@@ -23,8 +23,11 @@ export type VideoModeOptions = {
 export type VideoSignalStatsFrame = {
   time: number;
   yMin: number;
+  yMax: number;
   yAvg: number;
+  satMin: number;
   satAvg: number;
+  satMax: number;
 };
 
 export type TrimLeadingWhiteFramesOptions = {
@@ -34,6 +37,8 @@ export type TrimLeadingWhiteFramesOptions = {
   whiteYMin?: number;
   whiteYAvg?: number;
   maxWhiteSatAvg?: number;
+  maxFlatLumaRange?: number;
+  maxFlatSatRange?: number;
   crf?: number;
 };
 
@@ -87,21 +92,21 @@ export async function trimLeadingWhiteFrames(
   if (!frames.length) {
     return { path: resolvedPath, trimmed: false, trimStart: 0, reason: "no frames were readable" };
   }
-  if (!isNearlyWhiteFrame(frames[0]!, options)) {
-    return { path: resolvedPath, trimmed: false, trimStart: 0, reason: "first frame is not white" };
+  if (!isBlankIntroFrame(frames[0]!, options)) {
+    return { path: resolvedPath, trimmed: false, trimStart: 0, reason: "first frame is contentful" };
   }
 
-  const firstNonWhite = frames.find((frame) => !isNearlyWhiteFrame(frame, options));
-  if (!firstNonWhite) {
-    return { path: resolvedPath, trimmed: false, trimStart: 0, reason: "all sampled frames are white" };
+  const firstContentful = frames.find((frame) => !isBlankIntroFrame(frame, options));
+  if (!firstContentful) {
+    return { path: resolvedPath, trimmed: false, trimStart: 0, reason: "all sampled frames are blank" };
   }
 
-  await rewriteVideoFrom(resolvedPath, firstNonWhite.time, options);
+  await rewriteVideoFrom(resolvedPath, firstContentful.time, options);
   return {
     path: resolvedPath,
     trimmed: true,
-    trimStart: firstNonWhite.time,
-    reason: "trimmed leading white frames",
+    trimStart: firstContentful.time,
+    reason: "trimmed leading blank frames",
   };
 }
 
@@ -148,7 +153,7 @@ export function parseSignalStatsFrames(output: string): VideoSignalStatsFrame[] 
       continue;
     }
 
-    const statMatch = line.match(/^lavfi\.signalstats\.(YMIN|YAVG|SATAVG)=([0-9.]+)/);
+    const statMatch = line.match(/^lavfi\.signalstats\.(YMIN|YAVG|YMAX|SATMIN|SATAVG|SATMAX)=([0-9.]+)/);
     if (!statMatch) {
       continue;
     }
@@ -157,8 +162,14 @@ export function parseSignalStatsFrames(output: string): VideoSignalStatsFrame[] 
       current.yMin = value;
     } else if (statMatch[1] === "YAVG") {
       current.yAvg = value;
-    } else {
+    } else if (statMatch[1] === "YMAX") {
+      current.yMax = value;
+    } else if (statMatch[1] === "SATMIN") {
+      current.satMin = value;
+    } else if (statMatch[1] === "SATAVG") {
       current.satAvg = value;
+    } else {
+      current.satMax = value;
     }
   }
 
@@ -169,8 +180,11 @@ export function parseSignalStatsFrames(output: string): VideoSignalStatsFrame[] 
   return frames.filter((frame): frame is VideoSignalStatsFrame => {
     return Number.isFinite(frame.time)
       && Number.isFinite(frame.yMin)
+      && Number.isFinite(frame.yMax)
       && Number.isFinite(frame.yAvg)
-      && Number.isFinite(frame.satAvg);
+      && Number.isFinite(frame.satMin)
+      && Number.isFinite(frame.satAvg)
+      && Number.isFinite(frame.satMax);
   });
 }
 
@@ -179,6 +193,15 @@ export function isNearlyWhiteFrame(frame: VideoSignalStatsFrame, options: TrimLe
   const whiteYAvg = typeof options.whiteYAvg === "number" ? options.whiteYAvg : 232;
   const maxWhiteSatAvg = typeof options.maxWhiteSatAvg === "number" ? options.maxWhiteSatAvg : 4;
   return frame.yMin >= whiteYMin && frame.yAvg >= whiteYAvg && frame.satAvg <= maxWhiteSatAvg;
+}
+
+export function isBlankIntroFrame(frame: VideoSignalStatsFrame, options: TrimLeadingWhiteFramesOptions = {}) {
+  const maxFlatLumaRange = typeof options.maxFlatLumaRange === "number" ? options.maxFlatLumaRange : 10;
+  const maxFlatSatRange = typeof options.maxFlatSatRange === "number" ? options.maxFlatSatRange : 10;
+  const lumaRange = frame.yMax - frame.yMin;
+  const saturationRange = frame.satMax - frame.satMin;
+  return isNearlyWhiteFrame(frame, options)
+    || (lumaRange <= maxFlatLumaRange && saturationRange <= maxFlatSatRange);
 }
 
 async function rewriteVideoFrom(videoPath: string, trimStart: number, options: TrimLeadingWhiteFramesOptions) {
@@ -294,7 +317,7 @@ export const videoMode = (options: VideoModeOptions = {}): Plugin => {
       return emitter.on("afterTest", async ({ testInfo }) => {
         await new Promise((resolve) => setTimeout(resolve, pauseAfterTest));
         console.log(`video will be written to ${testInfo.outputDir}/video.webm`);
-        console.log(`trim leading white frames with: bun spec/plugins/video-mode.ts trim ${testInfo.outputDir}/video.webm`);
+        console.log(`trim leading blank frames with: bun spec/plugins/video-mode.ts trim ${testInfo.outputDir}/video.webm`);
       });
     },
   };
