@@ -8,6 +8,14 @@ import type { Terminal as XtermTerminal } from "@xterm/xterm";
 import { basicSetup } from "codemirror";
 import { stringify as stringifyYaml } from "yaml";
 import { showToast } from "./toast.ts";
+import {
+  createBrowserVoiceRecognizer,
+  createBrowserVoiceSpeaker,
+  createVoiceLoop,
+  type VoiceLoop,
+  type VoiceRecognizer,
+  type VoiceSpeaker,
+} from "./voice.ts";
 
 type SessionPayload = {
   id: string;
@@ -154,6 +162,17 @@ type LaunchSessionInput = {
   fakeAgent: string;
 };
 
+declare global {
+  interface Window {
+    __tuiuiVoiceTest?: {
+      recognizer?: VoiceRecognizer;
+      speaker?: VoiceSpeaker;
+      minReadbackDelayMs?: number;
+      now?: () => number;
+    };
+  }
+}
+
 const app = document.getElementById("app")!;
 let events: EventSource | null = null;
 let activeSession: SessionPayload | null = null;
@@ -173,6 +192,9 @@ let xtermLastStdoutEventId = 0;
 let xtermInputQueue = Promise.resolve();
 let xtermSyncQueue = Promise.resolve();
 let terminalScrollAnimationFrame: number | null = null;
+let voiceLoop: VoiceLoop | null = null;
+let unsubscribeVoiceLoop: (() => void) | null = null;
+let voiceReadbackTimer: number | null = null;
 
 showPageLoadToast();
 void renderRoute();
@@ -218,6 +240,10 @@ async function renderRoute() {
   destroyXterm();
   activeSession = null;
   destroyDataEditor();
+  unsubscribeVoiceLoop?.();
+  unsubscribeVoiceLoop = null;
+  voiceLoop = null;
+  clearVoiceReadbackTimer();
 
   const sessionMatch = location.pathname.match(/^\/sessions\/([^/]+)$/);
   if (sessionMatch) {
@@ -489,6 +515,12 @@ async function renderSession(sessionId: string) {
               </div>
             </details>
           </div>
+          <div class="voice-controls" role="group" aria-label="Voice mode">
+            <button type="button" id="voice-talk" class="icon-button voice-talk" aria-label="Push to talk" data-voice-status="idle">Talk</button>
+            <button type="button" id="voice-cancel" class="icon-button" aria-label="Cancel listening">Cancel</button>
+            <button type="button" id="voice-stop" class="icon-button" aria-label="Cancel speech playback">Audio</button>
+            <output id="voice-status" class="voice-status" data-testid="voice-status">Voice ready</output>
+          </div>
           <button type="button" id="send">Send</button>
         </div>
       </section>
@@ -503,6 +535,7 @@ async function renderSession(sessionId: string) {
 function bindSessionControls(sessionId: string) {
   const textarea = document.getElementById("stdin") as HTMLTextAreaElement;
   const sendButton = document.getElementById("send") as HTMLButtonElement;
+  setupVoiceControls(sessionId, textarea);
 
   sendButton.addEventListener("click", () => {
     void sendComposer(sessionId);
@@ -568,6 +601,83 @@ function bindSessionControls(sessionId: string) {
       scrollTerminalByStep(Number(button.dataset.terminalScroll || 0));
     });
   });
+}
+
+function setupVoiceControls(sessionId: string, textarea: HTMLTextAreaElement) {
+  unsubscribeVoiceLoop?.();
+  voiceLoop = createVoiceLoop({
+    recognizer: window.__tuiuiVoiceTest?.recognizer || createBrowserVoiceRecognizer(),
+    speaker: window.__tuiuiVoiceTest?.speaker || createBrowserVoiceSpeaker(),
+    now: window.__tuiuiVoiceTest?.now || (() => Date.now()),
+    minReadbackDelayMs: Number(window.__tuiuiVoiceTest?.minReadbackDelayMs || 700),
+    async sendTranscript(text) {
+      textarea.value = text;
+      await api(`/api/sessions/${sessionId}/send`, {
+        method: "POST",
+        body: JSON.stringify({ text, submit: true }),
+      });
+      textarea.value = "";
+    },
+  });
+  unsubscribeVoiceLoop = voiceLoop.subscribe(updateVoiceControls);
+
+  const talk = document.getElementById("voice-talk") as HTMLButtonElement | null;
+  const cancel = document.getElementById("voice-cancel") as HTMLButtonElement | null;
+  const stop = document.getElementById("voice-stop") as HTMLButtonElement | null;
+  if (!talk || !cancel || !stop) {
+    return;
+  }
+  talk.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    voiceLoop?.startListening();
+  });
+  talk.addEventListener("pointerup", (event) => {
+    event.preventDefault();
+    voiceLoop?.stopListening();
+  });
+  talk.addEventListener("pointercancel", () => {
+    voiceLoop?.cancelListening();
+  });
+  talk.addEventListener("keydown", (event) => {
+    if (event.key === " " || event.key === "Enter") {
+      event.preventDefault();
+      voiceLoop?.startListening();
+    }
+  });
+  talk.addEventListener("keyup", (event) => {
+    if (event.key === " " || event.key === "Enter") {
+      event.preventDefault();
+      voiceLoop?.stopListening();
+    }
+  });
+  cancel.addEventListener("click", () => {
+    voiceLoop?.cancelListening();
+  });
+  stop.addEventListener("click", () => {
+    voiceLoop?.stopSpeaking();
+  });
+}
+
+function updateVoiceControls(state: VoiceLoop["state"]) {
+  const talk = document.getElementById("voice-talk") as HTMLButtonElement | null;
+  const cancel = document.getElementById("voice-cancel") as HTMLButtonElement | null;
+  const stop = document.getElementById("voice-stop") as HTMLButtonElement | null;
+  const status = document.getElementById("voice-status") as HTMLOutputElement | null;
+  if (talk) {
+    talk.disabled = state.status === "unsupported";
+    talk.dataset.voiceStatus = state.status;
+    talk.setAttribute("aria-pressed", String(state.status === "listening" || state.status === "transcribing"));
+  }
+  if (cancel) {
+    cancel.disabled = state.status !== "listening" && state.status !== "transcribing";
+  }
+  if (stop) {
+    stop.disabled = state.status === "unsupported";
+  }
+  if (status) {
+    status.value = state.transcript ? `${state.message}: ${state.transcript}` : state.message;
+    status.textContent = status.value;
+  }
 }
 
 function closeSessionMenu() {
@@ -674,6 +784,32 @@ function renderSessionPayload(payload: SessionPayload | null) {
   if (stdoutLog) {
     stdoutLog.textContent = payload.stdoutEvents.map((event) => event.displayText ? `[${formatTime(event.createdAt)}] ${event.displayText}` : "").filter(Boolean).join("\n\n");
   }
+  voiceLoop?.observePayload(payload);
+  scheduleVoiceReadbackCheck(payload);
+}
+
+function scheduleVoiceReadbackCheck(payload: SessionPayload) {
+  if (!voiceLoop?.state.awaitingReadback || payload.lifecycle !== "running") {
+    clearVoiceReadbackTimer();
+    return;
+  }
+  if (voiceReadbackTimer !== null) {
+    return;
+  }
+  voiceReadbackTimer = window.setTimeout(() => {
+    voiceReadbackTimer = null;
+    void api<SessionPayload>(`/api/sessions/${payload.id}`)
+      .then(renderSessionPayload)
+      .catch(() => undefined);
+  }, payload.status === "idle" ? 350 : 1_100);
+}
+
+function clearVoiceReadbackTimer() {
+  if (voiceReadbackTimer === null) {
+    return;
+  }
+  window.clearTimeout(voiceReadbackTimer);
+  voiceReadbackTimer = null;
 }
 
 function scrollTerminalByStep(direction: number) {

@@ -378,7 +378,7 @@ textarea:focus {
   color: #eef2f7;
   box-shadow: 0 16px 36px rgba(0, 0, 0, 0.35);
   padding: 10px 12px;
-  pointer-events: auto;
+  pointer-events: none;
   opacity: 0;
   transform: translateY(6px);
   transition: opacity 160ms ease, transform 160ms ease;
@@ -426,7 +426,8 @@ textarea:focus {
 
 .toolbar,
 .composer-actions,
-.keys {
+.keys,
+.voice-controls {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -515,6 +516,12 @@ textarea:focus {
   border-color: #64d2c8;
 }
 
+.voice-talk[aria-pressed="true"] {
+  background: #f3c969;
+  border-color: #f3c969;
+  color: #101418;
+}
+
 .icon-button.danger {
   color: #ffd3d3;
 }
@@ -523,6 +530,23 @@ textarea:focus {
   background: #20262e;
   color: #dce5ef;
   border-color: #3a4350;
+}
+
+.voice-controls {
+  flex: 1 1 260px;
+  min-width: min(100%, 240px);
+  justify-content: flex-end;
+}
+
+.voice-status {
+  min-width: 116px;
+  max-width: 260px;
+  overflow: hidden;
+  color: #9ca8b6;
+  font-size: 11px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-pill {
@@ -1157,12 +1181,12 @@ textarea {
 
 .composer-actions {
   justify-content: space-between;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   min-width: 0;
 }
 
 .keys {
-  flex: 1;
+  flex: 1 1 230px;
   min-width: 0;
   flex-wrap: nowrap;
   gap: 4px;
@@ -1343,6 +1367,15 @@ textarea {
 
   .composer-actions {
     gap: 6px;
+  }
+
+  .keys,
+  .voice-controls {
+    flex: 1 1 auto;
+  }
+
+  .voice-controls {
+    justify-content: flex-start;
   }
 
   #send {
