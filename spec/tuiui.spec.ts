@@ -162,6 +162,34 @@ test("key chord buttons do not return focus to the composer", async ({ page, ctx
   expect(await composer.evaluate((element) => document.activeElement === element)).toBe(false);
 });
 
+test("renders binary-aware chord presets and sends user-defined chords", async ({ page, ctx }) => {
+  await page.goto(ctx.baseUrl);
+
+  await page.getByRole("textbox", { name: "Command" }).fill("semantic-agent");
+  await page.getByRole("button", { name: "Launch" }).click();
+  await expect(page.getByRole("group", { name: "Shortcut chords" }).getByRole("button", { name: "Tab" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Chord" }).click();
+  await page.getByRole("textbox", { name: "Chord label" }).fill("Model");
+  await page.getByRole("textbox", { name: "Chord sequence" }).fill("/model;enter");
+  await page.getByRole("button", { name: "Save + Send" }).click();
+
+  await expect(page.getByTestId("rendered-terminal")).toContainText("heard /model");
+  await expect(page.getByRole("group", { name: "Shortcut chords" }).getByRole("button", { name: "Model" })).toBeVisible();
+});
+
+test("orders chord presets by the running agent binary", async ({ page, ctx }) => {
+  await page.goto(ctx.baseUrl);
+
+  await page.getByRole("button", { name: "Fake Codex" }).click();
+  await expect(page.getByRole("group", { name: "Shortcut chords" }).getByRole("button", { name: "Ctrl-J" })).toBeVisible();
+  await expect(page.getByRole("group", { name: "Shortcut chords" }).locator("button").first()).toHaveText("Esc");
+
+  await page.goto(ctx.baseUrl);
+  await page.getByRole("button", { name: "Fake OpenCode" }).click();
+  await expect(page.getByRole("group", { name: "Shortcut chords" }).locator("button").first()).toHaveText("Esc Esc");
+});
+
 test("can type directly into the terminal renderer", async ({ page, ctx }) => {
   await page.goto(ctx.baseUrl);
 

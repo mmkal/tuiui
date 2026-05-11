@@ -47,6 +47,7 @@ import {
   type SessionSdkPayload,
 } from "./src/opencode-sdk.ts";
 import { createSessionId } from "./src/session-id.ts";
+import { resolveNamedKeySequence } from "./src/chords.ts";
 import { analyzeTerminalScreen, type SemanticScreen } from "./src/semantic-screen.ts";
 import { analyzeTerminalBlocks, type TerminalBlockModel } from "./src/terminal-blocks.ts";
 import { renderTerminalShotSvg } from "./src/tuishot.ts";
@@ -1755,32 +1756,7 @@ function sanitizeTerminalChunk(chunk: string) {
 }
 
 function resolveKeySequence(key: string) {
-  switch (key.toLowerCase()) {
-    case "esc":
-    case "escape":
-      return "\x1b";
-    case "tab":
-      return "\t";
-    case "enter":
-    case "return":
-      return "\r";
-    case "backspace":
-      return "\x7f";
-    case "up":
-      return "\x1b[A";
-    case "down":
-      return "\x1b[B";
-    case "left":
-      return "\x1b[D";
-    case "right":
-      return "\x1b[C";
-    case "ctrl+c":
-      return "\x03";
-    case "ctrl+d":
-      return "\x04";
-    default:
-      return key;
-  }
+  return resolveNamedKeySequence(key);
 }
 
 function minimalEnv(env: NodeJS.ProcessEnv) {
