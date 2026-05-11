@@ -1,11 +1,11 @@
 ---
-status: ready-for-review
+status: complete
 size: medium
 ---
 
 # SDK-Based TUI Summary Pivot
 
-Status: Provider parity is in place for OpenCode, Codex, and Claude. The Summary tab now presents a human/agent-facing session brief first, keeps provider snapshot YAML collapsed as diagnostics, and reuses completed briefs when the fork point has not changed.
+Status: Done and moved to complete on 2026-05-11. Provider parity is in place for OpenCode, Codex, and Claude. The Summary tab presents a human/agent-facing session brief first, keeps provider snapshot YAML collapsed as diagnostics, reuses completed briefs when the fork point has not changed, and now includes an inline tuishot of the current terminal view.
 
 - [x] Stop treating ASCII/box parsing as the main path for summarization. _The browser now defaults to TTY and exposes Summary instead of Blocks; block parsing remains in code only as a lower-level diagnostic._
 - [x] Launch OpenCode TUIs with a deterministic local server port so TUI UI can connect to the same server the TUI is using. _`prepareSessionSdk` appends/normalizes `opencode --hostname 127.0.0.1 --port <free-port>` in `cli.ts`._

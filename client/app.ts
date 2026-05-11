@@ -39,6 +39,10 @@ type SessionPayload = {
   stdoutEvents: Array<{ id: number; chunk: string; displayText: string; createdAt: string }>;
 };
 
+type ClientConfig = {
+  pageLoadToasts: boolean;
+};
+
 type SessionSdkPayload = {
   provider: "" | "opencode" | "codex" | "claude";
   state: "unavailable" | "ready" | "connected" | "not-found" | "error";
@@ -196,12 +200,27 @@ let voiceLoop: VoiceLoop | null = null;
 let unsubscribeVoiceLoop: (() => void) | null = null;
 let voiceReadbackTimer: number | null = null;
 
-showPageLoadToast();
-void renderRoute();
+void boot();
 
 window.addEventListener("popstate", () => {
   void renderRoute();
 });
+
+async function boot() {
+  const config = await loadClientConfig();
+  if (config.pageLoadToasts) {
+    showPageLoadToast();
+  }
+  await renderRoute();
+}
+
+async function loadClientConfig(): Promise<ClientConfig> {
+  try {
+    return await api<ClientConfig>("/api/config");
+  } catch {
+    return { pageLoadToasts: false };
+  }
+}
 
 function showPageLoadToast() {
   const count = incrementPageLoadCount();
@@ -521,7 +540,9 @@ async function renderSession(sessionId: string) {
             <button type="button" id="voice-stop" class="icon-button" aria-label="Cancel speech playback">Audio</button>
             <output id="voice-status" class="voice-status" data-testid="voice-status">Voice ready</output>
           </div>
-          <button type="button" id="send">Send</button>
+          <button type="button" id="send" aria-label="Send" title="Send">
+            <span aria-hidden="true">↵</span>
+          </button>
         </div>
       </section>
     </main>

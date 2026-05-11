@@ -218,6 +218,12 @@ function startServer(options: { host: string; port: number; state: ServerState }
 }
 
 async function handleApiRequest(state: ServerState, request: Request, url: URL): Promise<Response> {
+  if (request.method === "GET" && url.pathname === "/api/config") {
+    return Response.json({
+      pageLoadToasts: process.env.TUIUI_PAGE_LOAD_TOASTS === "1",
+    });
+  }
+
   if (request.method === "GET" && url.pathname === "/api/cwd") {
     return Response.json({ cwd: fs.realpathSync(process.cwd()) });
   }
