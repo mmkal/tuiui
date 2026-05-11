@@ -489,7 +489,9 @@ async function renderSession(sessionId: string) {
               </div>
             </details>
           </div>
-          <button type="button" id="send">Send</button>
+          <button type="button" id="send" aria-label="Send" title="Send">
+            <span aria-hidden="true">↵</span>
+          </button>
         </div>
       </section>
     </main>

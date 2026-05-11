@@ -218,6 +218,23 @@ test("keeps mobile session chrome compact without document scrolling", async ({ 
   await page.getByRole("textbox", { name: "Command" }).fill("scrollback-agent");
   await page.getByRole("button", { name: "Launch" }).click();
   await expect(page.getByTestId("rendered-terminal")).toContainText("scrollback line 80");
+  await expect(page.getByTestId("page-load-toast")).toBeVisible();
+  const toastPlacement = await page.evaluate(() => {
+    const toast = document.querySelector<HTMLElement>("[data-testid='page-load-toast']")!.getBoundingClientRect();
+    const menu = document.querySelector<HTMLElement>(".menu-button")!.getBoundingClientRect();
+    return {
+      toastLeft: toast.left,
+      toastRight: toast.right,
+      toastTop: toast.top,
+      menuBottom: menu.bottom,
+      intersectsMenu: !(toast.right < menu.left || toast.left > menu.right || toast.bottom < menu.top || toast.top > menu.bottom),
+    };
+  });
+  expect(toastPlacement.toastLeft).toBeGreaterThanOrEqual(8);
+  expect(toastPlacement.toastRight).toBeLessThanOrEqual(390 - 8);
+  expect(toastPlacement.toastTop).toBeGreaterThanOrEqual(toastPlacement.menuBottom);
+  expect(toastPlacement.intersectsMenu).toBe(false);
+  await expect(page.getByRole("button", { name: "Send" })).toContainText("↵");
 
   await expect.poll(async () => {
     return await page.evaluate(() => {
