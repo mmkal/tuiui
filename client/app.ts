@@ -31,6 +31,10 @@ type SessionPayload = {
   stdoutEvents: Array<{ id: number; chunk: string; displayText: string; createdAt: string }>;
 };
 
+type ClientConfig = {
+  pageLoadToasts: boolean;
+};
+
 type SessionSdkPayload = {
   provider: "" | "opencode" | "codex" | "claude";
   state: "unavailable" | "ready" | "connected" | "not-found" | "error";
@@ -188,12 +192,27 @@ let xtermInputQueue = Promise.resolve();
 let xtermSyncQueue = Promise.resolve();
 let terminalScrollAnimationFrame: number | null = null;
 
-showPageLoadToast();
-void renderRoute();
+void boot();
 
 window.addEventListener("popstate", () => {
   void renderRoute();
 });
+
+async function boot() {
+  const config = await loadClientConfig();
+  if (config.pageLoadToasts) {
+    showPageLoadToast();
+  }
+  await renderRoute();
+}
+
+async function loadClientConfig(): Promise<ClientConfig> {
+  try {
+    return await api<ClientConfig>("/api/config");
+  } catch {
+    return { pageLoadToasts: false };
+  }
+}
 
 function showPageLoadToast() {
   const count = incrementPageLoadCount();
@@ -503,7 +522,9 @@ async function renderSession(sessionId: string) {
               </div>
             </details>
           </div>
-          <button type="button" id="send">Send</button>
+          <button type="button" id="send" aria-label="Send" title="Send">
+            <span aria-hidden="true">↵</span>
+          </button>
         </div>
       </section>
     </main>
