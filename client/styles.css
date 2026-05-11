@@ -1161,6 +1161,16 @@ textarea {
   min-width: 0;
 }
 
+#send {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1;
+  min-width: 38px;
+  min-height: 34px;
+  padding: 0;
+  font-size: 17px;
+}
+
 .keys {
   flex: 1;
   min-width: 0;
@@ -1266,9 +1276,11 @@ textarea {
   }
 
   .toast-viewport {
-    right: 8px;
-    bottom: max(8px, env(safe-area-inset-bottom));
-    width: calc(100vw - 16px);
+    top: calc(max(8px, env(safe-area-inset-top)) + 40px);
+    right: 10px;
+    bottom: auto;
+    left: 10px;
+    width: auto;
   }
 
   .menu-button {
@@ -1346,9 +1358,13 @@ textarea {
   }
 
   #send {
+    display: grid;
+    place-items: center;
+    aspect-ratio: 1;
     min-height: 30px;
-    padding: 0 10px;
-    font-size: 12px;
+    min-width: 34px;
+    padding: 0;
+    font-size: 16px;
   }
 
   .overflow-key {
