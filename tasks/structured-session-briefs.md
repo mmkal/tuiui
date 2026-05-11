@@ -1,11 +1,11 @@
 ---
-status: ready
+status: in-progress
 size: medium
 ---
 
 # Structured Session Briefs
 
-Status: Not started. The current Summary tab shows provider-specific brief markdown, but the product shape should become a provider-independent structured brief contract.
+Status: Spec commit for implementation. The branch will turn Session brief output into a provider-independent structured contract while keeping the Summary tab readable and diagnostics available.
 
 - [ ] Define a provider-independent Session brief schema. _Likely sections: executive summary, initial user request, current state, completed work, files changed, risks/blockers, suggested next actions._
 - [ ] Decide whether the wire format should be XML-style tags, YAML, JSON, or markdown with strict headings. _The format should be easy for both humans and future meta-agents to parse._
@@ -20,3 +20,10 @@ Status: Not started. The current Summary tab shows provider-specific brief markd
 - The useful product contract is probably not "whatever markdown the provider returns"; it is a stable TUI UI brief format that every provider adapter fills.
 - Codex and Claude already build custom summary prompts from transcript snapshots.
 - OpenCode currently calls `session.fork` plus provider `session.summarize`, which is convenient but less controllable.
+
+## Implementation Notes
+
+- Use XML-style tags for the generated provider output in the first pass because they are easy to prompt, inspect, and parse without adding a new dependency.
+- Render parsed sections as the primary Summary tab content, with the raw structured brief kept in diagnostics.
+- Keep the fork-point reuse behavior unchanged.
+- If OpenCode's built-in summary cannot be shaped, route OpenCode through the same sidecar prompt style as Codex/Claude.
