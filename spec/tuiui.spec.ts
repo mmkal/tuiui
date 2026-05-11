@@ -143,7 +143,7 @@ test("sends named key chords separately from the composer", async ({ page, ctx }
   await clickSessionMenuButton(page, "HTML");
   await expect(page.getByTestId("semantic-screen")).toContainText("OpenAI Codex");
 
-  await page.getByRole("button", { name: "esc" }).click();
+  await page.getByRole("group", { name: "Keys" }).getByRole("button", { name: "esc" }).click();
 
   await expect.poll(async () => (await fetchSessionPayload(page)).stdinEvents.at(-1)?.text).toBe("\x1b");
 });
@@ -207,7 +207,7 @@ test("key chord buttons do not return focus to the composer", async ({ page, ctx
   const composer = page.getByRole("textbox", { name: "Send stdin" });
   await composer.focus();
   await expect(composer).toBeFocused();
-  await page.getByRole("button", { name: "esc" }).click();
+  await page.getByRole("group", { name: "Keys" }).getByRole("button", { name: "esc" }).click();
 
   await expect.poll(async () => (await fetchSessionPayload(page)).stdinEvents.at(-1)?.text).toBe("\x1b");
   expect(await composer.evaluate((element) => document.activeElement === element)).toBe(false);
