@@ -4,7 +4,9 @@ import * as path from "node:path";
 import { expect, test } from "bun:test";
 import {
   buildClaudeSummary,
+  buildClaudeSidecarSummary,
   claudeConfigDirForEnv,
+  createClaudeSummaryPrompt,
   readRecentClaudeSessions,
   resolveClaudeSession,
 } from "../src/claude-sdk.ts";
@@ -62,6 +64,33 @@ test("builds a Claude summary from SDK session messages", () => {
     messageCount: 3,
     latestUserText: "make it sidecar",
     latestAssistantText: "claude summary is wired",
+  });
+});
+
+test("asks Claude sidecars for the shared XML session brief contract", () => {
+  const summary = buildClaudeSummary(
+    claudeSession("source-session", "/repo", "2026-05-08T14:28:00.000Z", "2026-05-08T14:28:05.000Z"),
+    [claudeMessage("user", "ship claude summaries", "2026-05-08T14:28:01.000Z")],
+  );
+
+  const prompt = createClaudeSummaryPrompt(summary);
+
+  expect(prompt).toContain("<session_brief format=\"tuiui.sessionBrief.v1\">");
+  expect(prompt).toContain("<current_state>");
+  expect(prompt).toContain("<files_changed>");
+});
+
+test("parses Claude sidecar output into a structured session brief", () => {
+  const summary = buildClaudeSidecarSummary("fork-session", structuredBriefXml());
+
+  expect(summary).toMatchObject({
+    provider: "claude",
+    sessionBrief: {
+      executiveSummary: "Structured Claude brief.",
+      completedWork: ["Added Claude parsing."],
+      suggestedNextActions: ["Run the tests."],
+      parseErrors: [],
+    },
   });
 });
 
@@ -144,6 +173,20 @@ function writeClaudeJsonlSession(
       },
     }),
   ].join("\n"));
+}
+
+function structuredBriefXml() {
+  return [
+    "<session_brief format=\"tuiui.sessionBrief.v1\">",
+    "  <executive_summary>Structured Claude brief.</executive_summary>",
+    "  <initial_user_request>Ship summaries.</initial_user_request>",
+    "  <current_state>Ready for review.</current_state>",
+    "  <completed_work><item>Added Claude parsing.</item></completed_work>",
+    "  <files_changed><file path=\"src/claude-sdk.ts\">Prompt and parser wiring.</file></files_changed>",
+    "  <risks_blockers></risks_blockers>",
+    "  <suggested_next_actions><item>Run the tests.</item></suggested_next_actions>",
+    "</session_brief>",
+  ].join("\n");
 }
 
 function createTempWorkspace() {

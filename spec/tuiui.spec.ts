@@ -390,12 +390,13 @@ test("can drive OpenCode through fakeagent when OpenCode is installed", async ({
   const refreshedPayload = await fetchSessionPayload(page);
   expect(refreshedPayload.sdk.summary.latestAssistantText).toContain("three");
   await page.getByRole("button", { name: "Get session brief" }).click();
-  await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("method: opencode.session.fork+summarize", { timeout: 20_000 });
+  await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("method: opencode.session.fork+prompt", { timeout: 20_000 });
   await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("status: completed");
   await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("forks:");
   await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("forkSessionId:");
   await expect(page.getByTestId("session-brief")).toContainText("current");
-  await expect.poll(async () => (await page.getByTestId("session-brief").locator("pre").textContent())?.trim()).not.toBe("No session brief yet.");
+  await expect(page.getByTestId("session-brief")).toContainText("Executive summary");
+  await expect(page.getByTestId("session-brief")).toContainText("Suggested next actions");
   const payload = await fetchSessionPayload(page);
   expect(payload.sdk.forks[0]).toMatchObject({
     provider: "opencode",

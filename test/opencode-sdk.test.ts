@@ -1,5 +1,11 @@
 import { expect, test } from "bun:test";
-import { buildOpenCodeSummary, recentOpenCodeSessionsFromRows, resolveOpenCodeSession } from "../src/opencode-sdk.ts";
+import {
+  buildOpenCodeSidecarSummary,
+  buildOpenCodeSummary,
+  createOpenCodeSummaryPrompt,
+  recentOpenCodeSessionsFromRows,
+  resolveOpenCodeSession,
+} from "../src/opencode-sdk.ts";
 
 test("prefers the OpenCode session created for this TUI over stale sessions in the same directory", () => {
   const session = resolveOpenCodeSession({
@@ -61,6 +67,34 @@ test("does not treat compaction as the latest user message", () => {
   expect(summary).toMatchObject({
     latestUserText: "first real prompt",
     latestAssistantText: "summary internals",
+  });
+});
+
+test("asks OpenCode sidecars for the shared XML session brief contract", () => {
+  const summary = buildOpenCodeSummary(
+    { title: "TUI UI test" },
+    [message("user", "ship opencode summaries")],
+    [],
+  );
+
+  const prompt = createOpenCodeSummaryPrompt(summary);
+
+  expect(prompt).toContain("<session_brief format=\"tuiui.sessionBrief.v1\">");
+  expect(prompt).toContain("<completed_work>");
+  expect(prompt).toContain("<risks_blockers>");
+});
+
+test("parses OpenCode sidecar output into a structured session brief", () => {
+  const summary = buildOpenCodeSidecarSummary({ id: "fork-session", title: "OpenCode fork" }, structuredBriefXml());
+
+  expect(summary).toMatchObject({
+    provider: "opencode",
+    title: "OpenCode fork",
+    sessionBrief: {
+      executiveSummary: "Structured OpenCode brief.",
+      filesChanged: [{ path: "src/opencode-sdk.ts", summary: "Prompt and parser wiring." }],
+      parseErrors: [],
+    },
   });
 });
 
@@ -132,4 +166,18 @@ function messageAt(role: string, text: string, createdAt: string) {
     },
     parts: [{ type: "text", text }],
   };
+}
+
+function structuredBriefXml() {
+  return [
+    "<session_brief format=\"tuiui.sessionBrief.v1\">",
+    "  <executive_summary>Structured OpenCode brief.</executive_summary>",
+    "  <initial_user_request>Ship summaries.</initial_user_request>",
+    "  <current_state>Ready for review.</current_state>",
+    "  <completed_work><item>Added OpenCode parsing.</item></completed_work>",
+    "  <files_changed><file path=\"src/opencode-sdk.ts\">Prompt and parser wiring.</file></files_changed>",
+    "  <risks_blockers></risks_blockers>",
+    "  <suggested_next_actions><item>Run the tests.</item></suggested_next_actions>",
+    "</session_brief>",
+  ].join("\n");
 }

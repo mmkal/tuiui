@@ -998,16 +998,68 @@ pre {
   color: #ffd3d3;
 }
 
-.session-brief pre {
+.session-brief-content {
   min-width: 0;
   min-height: 0;
-  margin: 0;
   overflow: auto;
   padding: 10px;
   color: #dce5ef;
+}
+
+.session-brief-content pre {
+  margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.brief-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.brief-section {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid #242b35;
+  border-radius: 7px;
+  background: #0d1014;
+  padding: 8px;
+}
+
+.brief-section-primary {
+  margin-bottom: 8px;
+  border-color: #3a4350;
+  background: #151b22;
+}
+
+.brief-section strong {
+  color: #eef2f7;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.brief-section p,
+.brief-section ul {
+  margin: 0;
+  color: #dce5ef;
+  font-size: 12px;
+  line-height: 1.42;
+}
+
+.brief-section ul {
+  padding-left: 17px;
+}
+
+.brief-section li + li {
+  margin-top: 4px;
+}
+
+.brief-section code {
+  color: #64d2c8;
+  font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 .sdk-diagnostics {

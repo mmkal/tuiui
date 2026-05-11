@@ -9,6 +9,7 @@ import {
   type SessionMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentSessionSummary, RecentAgentSession } from "./opencode-sdk.ts";
+import { createStructuredSessionBriefPrompt, parseStructuredSessionBrief } from "./session-brief.ts";
 
 type ResolveClaudeSessionInput = {
   sessions: SDKSessionInfo[];
@@ -133,6 +134,7 @@ export function buildClaudeSummary(session: SDKSessionInfo, messages: SessionMes
     deletions: 0,
     latestUserText: latestUserText.slice(0, 20_000),
     latestAssistantText: latestAssistantText.slice(0, 20_000),
+    sessionBrief: null,
     transcript: transcript.slice(-80),
     diffs: [],
   };
@@ -151,6 +153,7 @@ export function buildClaudeSidecarSummary(sessionId: string, finalResponse: stri
     deletions: 0,
     latestUserText: "",
     latestAssistantText: text,
+    sessionBrief: text ? parseStructuredSessionBrief(text) : null,
     transcript: text ? [{
       id: `${sessionId}-summary`,
       role: "assistant",
@@ -162,29 +165,7 @@ export function buildClaudeSidecarSummary(sessionId: string, finalResponse: stri
 }
 
 export function createClaudeSummaryPrompt(summary: AgentSessionSummary) {
-  return [
-    "Summarize this Claude TUI session for someone supervising multiple local agent sessions.",
-    "",
-    "Return concise markdown with these headings:",
-    "- Current state",
-    "- Important context",
-    "- Recent user intent",
-    "- Recent assistant work",
-    "- Risks or blockers",
-    "- Suggested next action",
-    "",
-    "Do not inspect or edit the repository. Use only the transcript below.",
-    "",
-    `Title: ${summary.title}`,
-    `Latest user message: ${summary.latestUserText}`,
-    `Latest assistant message: ${summary.latestAssistantText}`,
-    "",
-    "Transcript:",
-    ...summary.transcript.map((message) => {
-      const label = [message.createdAt, message.role].filter(Boolean).join(" ");
-      return `\n[${label}]\n${message.text}`;
-    }),
-  ].join("\n");
+  return createStructuredSessionBriefPrompt("Claude", summary);
 }
 
 export async function runClaudeSidecarSummary(input: {

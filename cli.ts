@@ -37,6 +37,8 @@ import {
 import { formatFakeAgentFallback } from "./src/fakeagent-response.ts";
 import {
   buildOpenCodeSummary,
+  buildOpenCodeSidecarSummary,
+  createOpenCodeSummaryPrompt,
   openCodeDatabasePathForEnv,
   pickOpenCodeModel,
   readRecentOpenCodeSessionsFromDatabasePath,
@@ -665,6 +667,25 @@ async function createTestingFakeAgent() {
       if (/title generator/i.test(parsed.systemPrompt)) {
         return parsed.respond.text("TUI UI test");
       }
+      if (/<session_brief/i.test(text)) {
+        return parsed.respond.text([
+          "<session_brief format=\"tuiui.sessionBrief.v1\">",
+          "  <executive_summary>The session is being summarized for supervision.</executive_summary>",
+          "  <initial_user_request>Answer the user's terminal prompt.</initial_user_request>",
+          "  <current_state>The sidecar brief was generated from the captured transcript.</current_state>",
+          "  <completed_work>",
+          "    <item>Reviewed the latest user and assistant messages.</item>",
+          "  </completed_work>",
+          "  <files_changed>",
+          "  </files_changed>",
+          "  <risks_blockers>",
+          "  </risks_blockers>",
+          "  <suggested_next_actions>",
+          "    <item>Continue from the source session if more work is needed.</item>",
+          "  </suggested_next_actions>",
+          "</session_brief>",
+        ].join("\n"));
+      }
       if (parsed.body.messages?.some((message: any) => message.role === "tool")) {
         return parsed.respond.text("the file says hi");
       }
@@ -1071,7 +1092,7 @@ async function summarizeSessionWithSdk(session: RuntimeSession) {
     sidecarSummary: {
       implemented: true,
       status: "running",
-      method: "opencode.session.fork+summarize",
+      method: "opencode.session.fork+prompt",
       sourceSessionId: session.sdk.externalSessionId,
       forkSessionId: "",
       forkPoint: "",
@@ -1112,7 +1133,7 @@ async function summarizeSessionWithSdk(session: RuntimeSession) {
     const reusableBrief = findReusableSessionBrief(session, "opencode", sourceSessionId, sourceForkPoint);
     if (reusableBrief) {
       reuseSessionBrief(session, {
-        method: "opencode.session.fork+summarize",
+        method: "opencode.session.fork+prompt",
         sourceSessionId,
         sourceForkPoint,
         sourceSummary,
@@ -1156,36 +1177,37 @@ async function summarizeSessionWithSdk(session: RuntimeSession) {
       sidecarSummary: {
         implemented: true,
         status: "running",
-        method: "opencode.session.fork+summarize",
+        method: "opencode.session.fork+prompt",
         sourceSessionId,
         forkSessionId,
         forkPoint: sourceForkPoint,
         updatedAt: forkCreatedAt,
         result: null,
         error: "",
-        note: "Fork created; running OpenCode session.summarize on the fork so the live TUI session is left untouched.",
+        note: "Fork created; asking OpenCode for the structured brief on the fork so the live TUI session is left untouched.",
       },
     };
     publishSession(session);
 
-    const result = responseData<boolean>(await client.session.summarize({
+    const prompted = responseData<any>(await client.session.prompt({
       path: { id: forkSessionId },
-      body: model,
+      body: {
+        model,
+        tools: {},
+        parts: [{
+          type: "text",
+          text: createOpenCodeSummaryPrompt(sourceSummary),
+        }],
+      },
       responseStyle: "data",
       throwOnError: true,
     }));
-    const [forkMessages, forkDiffs] = await Promise.all([
-      client.session.messages({
-        path: { id: forkSessionId },
-        responseStyle: "data",
-        throwOnError: true,
-      }).then(responseData<any[]>).catch(() => []),
-      client.session.diff({
-        path: { id: forkSessionId },
-        responseStyle: "data",
-        throwOnError: true,
-      }).then(responseData<any[]>).catch(() => []),
-    ]);
+    const finalResponse = openCodeResponseText(prompted);
+    const forkDiffs = await client.session.diff({
+      path: { id: forkSessionId },
+      responseStyle: "data",
+      throwOnError: true,
+    }).then(responseData<any[]>).catch(() => []);
     const summarizedAt = new Date().toISOString();
     session.sdk = {
       ...session.sdk,
@@ -1199,21 +1221,31 @@ async function summarizeSessionWithSdk(session: RuntimeSession) {
         createdAt: forkCreatedAt,
         updatedAt: summarizedAt,
         status: "summarized",
-        result,
+        result: true,
         error: "",
-        summary: buildOpenCodeSummary(forked, forkMessages, forkDiffs),
+        summary: {
+          ...buildOpenCodeSidecarSummary(forked, finalResponse),
+          diffCount: forkDiffs.length,
+          additions: forkDiffs.reduce((total, diff) => total + Number(diff.additions || 0), 0),
+          deletions: forkDiffs.reduce((total, diff) => total + Number(diff.deletions || 0), 0),
+          diffs: forkDiffs.map((diff) => ({
+            file: String(diff.file || ""),
+            additions: Number(diff.additions || 0),
+            deletions: Number(diff.deletions || 0),
+          })),
+        },
       }),
       sidecarSummary: {
         implemented: true,
         status: "completed",
-        method: "opencode.session.fork+summarize",
+        method: "opencode.session.fork+prompt",
         sourceSessionId,
         forkSessionId,
         forkPoint: sourceForkPoint,
         updatedAt: summarizedAt,
-        result,
+        result: true,
         error: "",
-        note: "OpenCode session.summarize compacted the fork. The live provider session remains the source session.",
+        note: "OpenCode produced the structured brief in a sidecar fork. The live provider session remains the source session.",
       },
     };
     await refreshSessionSdk(session);
@@ -1238,7 +1270,7 @@ async function summarizeSessionWithSdk(session: RuntimeSession) {
       sidecarSummary: {
         implemented: true,
         status: "error",
-        method: "opencode.session.fork+summarize",
+        method: "opencode.session.fork+prompt",
         sourceSessionId,
         forkSessionId,
         forkPoint: existingFork ? existingFork.forkPoint : sourceForkPoint,
@@ -1334,7 +1366,7 @@ function reuseCurrentSessionBrief(session: RuntimeSession) {
 
 function sidecarSummaryMethodForProvider(provider: SessionSdkPayload["provider"]): SessionSdkPayload["sidecarSummary"]["method"] {
   if (provider === "opencode") {
-    return "opencode.session.fork+summarize";
+    return "opencode.session.fork+prompt";
   }
   if (provider === "codex") {
     return "codex.startThread+summary";
@@ -1717,6 +1749,16 @@ function createOpenCodeClient(session: RuntimeSession) {
 
 function responseData<T>(value: any): T {
   return value && typeof value === "object" && "data" in value ? value.data as T : value as T;
+}
+
+function openCodeResponseText(message: any) {
+  const parts = Array.isArray(message?.parts) ? message.parts : [];
+  return parts.map((part: any) => {
+    if (part && typeof part === "object" && part.type === "text") {
+      return String(part.text || "");
+    }
+    return "";
+  }).filter(Boolean).join("\n").trim();
 }
 
 async function getFreePort() {

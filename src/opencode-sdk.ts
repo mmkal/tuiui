@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
+import { createStructuredSessionBriefPrompt, parseStructuredSessionBrief, type StructuredSessionBrief } from "./session-brief.ts";
 
 export type AgentProvider = "opencode" | "codex" | "claude";
 
@@ -21,7 +22,7 @@ export type SessionSdkPayload = {
 export type SidecarSummaryState = {
   implemented: boolean;
   status: "idle" | "running" | "completed" | "error";
-  method: "" | "opencode.session.fork+summarize" | "codex.startThread+summary" | "claude.query+forkSession";
+  method: "" | "opencode.session.fork+prompt" | "codex.startThread+summary" | "claude.query+forkSession";
   sourceSessionId: string;
   forkSessionId: string;
   forkPoint: string;
@@ -55,6 +56,7 @@ export type AgentSessionSummary = {
   deletions: number;
   latestUserText: string;
   latestAssistantText: string;
+  sessionBrief: StructuredSessionBrief | null;
   transcript: Array<{
     id: string;
     role: string;
@@ -145,9 +147,38 @@ export function buildOpenCodeSummary(session: any, messages: any[], diffs: any[]
     deletions: normalizedDiffs.reduce((total, diff) => total + diff.deletions, 0),
     latestUserText,
     latestAssistantText,
+    sessionBrief: null,
     transcript,
     diffs: normalizedDiffs,
   };
+}
+
+export function buildOpenCodeSidecarSummary(session: any, finalResponse: string): AgentSessionSummary {
+  const now = new Date().toISOString();
+  const text = finalResponse.trim();
+  return {
+    provider: "opencode",
+    title: String(session.title || "OpenCode sidecar summary"),
+    forkPoint: text ? String(session.id || "opencode-sidecar-summary") : "",
+    messageCount: text ? 1 : 0,
+    diffCount: 0,
+    additions: 0,
+    deletions: 0,
+    latestUserText: "",
+    latestAssistantText: text,
+    sessionBrief: text ? parseStructuredSessionBrief(text) : null,
+    transcript: text ? [{
+      id: `${String(session.id || "opencode")}-summary`,
+      role: "assistant",
+      createdAt: now,
+      text,
+    }] : [],
+    diffs: [],
+  };
+}
+
+export function createOpenCodeSummaryPrompt(summary: AgentSessionSummary) {
+  return createStructuredSessionBriefPrompt("OpenCode", summary);
 }
 
 export function openCodeDatabasePathForEnv(env: NodeJS.ProcessEnv) {

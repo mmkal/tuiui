@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
 import type { AgentSessionSummary, RecentAgentSession } from "./opencode-sdk.ts";
+import { createStructuredSessionBriefPrompt, parseStructuredSessionBrief } from "./session-brief.ts";
 
 export type CodexThreadRow = {
   id: string;
@@ -185,6 +186,7 @@ export function buildCodexSummary(thread: CodexThreadRow): AgentSessionSummary {
     deletions: 0,
     latestUserText: latestUserText.slice(0, 20_000),
     latestAssistantText: latestAssistantText.slice(0, 20_000),
+    sessionBrief: null,
     transcript: transcript.slice(-80),
     diffs: [],
   };
@@ -203,6 +205,7 @@ export function buildCodexSidecarSummary(threadId: string, finalResponse: string
     deletions: 0,
     latestUserText: "",
     latestAssistantText: text,
+    sessionBrief: text ? parseStructuredSessionBrief(text) : null,
     transcript: text ? [{
       id: `${threadId}-summary`,
       role: "assistant",
@@ -214,29 +217,7 @@ export function buildCodexSidecarSummary(threadId: string, finalResponse: string
 }
 
 export function createCodexSummaryPrompt(summary: AgentSessionSummary) {
-  return [
-    "Summarize this Codex TUI session for someone supervising multiple local agent sessions.",
-    "",
-    "Return concise markdown with these headings:",
-    "- Current state",
-    "- Important context",
-    "- Recent user intent",
-    "- Recent assistant work",
-    "- Risks or blockers",
-    "- Suggested next action",
-    "",
-    "Do not inspect or edit the repository. Use only the transcript below.",
-    "",
-    `Title: ${summary.title}`,
-    `Latest user message: ${summary.latestUserText}`,
-    `Latest assistant message: ${summary.latestAssistantText}`,
-    "",
-    "Transcript:",
-    ...summary.transcript.map((message) => {
-      const label = [message.createdAt, message.role].filter(Boolean).join(" ");
-      return `\n[${label}]\n${message.text}`;
-    }),
-  ].join("\n");
+  return createStructuredSessionBriefPrompt("Codex", summary);
 }
 
 export function getCodexHomeDir(env: NodeJS.ProcessEnv) {

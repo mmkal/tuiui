@@ -5,6 +5,8 @@ import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import {
   buildCodexSummary,
+  buildCodexSidecarSummary,
+  createCodexSummaryPrompt,
   readCodexThreadsFromDatabasePath,
   recentCodexSessionsFromThreads,
   resolveCodexStateDatabasePathForEnv,
@@ -182,6 +184,37 @@ test("builds a Codex summary from rollout messages without treating AGENTS as th
   });
 });
 
+test("asks Codex sidecars for the shared XML session brief contract", () => {
+  const summary = buildCodexSummary(codexThread(
+    "source-thread",
+    "/repo",
+    "2026-05-08T14:28:00.000Z",
+    "2026-05-08T14:28:05.000Z",
+    "",
+  ));
+
+  const prompt = createCodexSummaryPrompt(summary);
+
+  expect(prompt).toContain("<session_brief format=\"tuiui.sessionBrief.v1\">");
+  expect(prompt).toContain("<executive_summary>");
+  expect(prompt).toContain("<suggested_next_actions>");
+});
+
+test("parses Codex sidecar output into a structured session brief", () => {
+  const summary = buildCodexSidecarSummary("sidecar-thread", structuredBriefXml());
+
+  expect(summary).toMatchObject({
+    provider: "codex",
+    latestAssistantText: expect.stringContaining("<session_brief"),
+    sessionBrief: {
+      executiveSummary: "Structured Codex brief.",
+      completedWork: ["Added Codex parsing."],
+      suggestedNextActions: ["Review the PR."],
+      parseErrors: [],
+    },
+  });
+});
+
 function codexThread(id: string, cwd: string, createdAt: string, updatedAt: string, rolloutPath: string): CodexThreadRow {
   return {
     id,
@@ -214,6 +247,20 @@ function rolloutMessage(timestamp: string, role: string, text: string) {
       }],
     },
   });
+}
+
+function structuredBriefXml() {
+  return [
+    "<session_brief format=\"tuiui.sessionBrief.v1\">",
+    "  <executive_summary>Structured Codex brief.</executive_summary>",
+    "  <initial_user_request>Ship summaries.</initial_user_request>",
+    "  <current_state>Ready for review.</current_state>",
+    "  <completed_work><item>Added Codex parsing.</item></completed_work>",
+    "  <files_changed><file path=\"src/codex-sdk.ts\">Prompt and parser wiring.</file></files_changed>",
+    "  <risks_blockers></risks_blockers>",
+    "  <suggested_next_actions><item>Review the PR.</item></suggested_next_actions>",
+    "</session_brief>",
+  ].join("\n");
 }
 
 function createCodexThreadDatabase(databasePath: string, thread: CodexThreadRow) {

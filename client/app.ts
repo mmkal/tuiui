@@ -51,15 +51,29 @@ type SessionSdkPayload = {
     deletions: number;
     latestUserText: string;
     latestAssistantText: string;
+    sessionBrief: StructuredSessionBrief | null;
     transcript: Array<{ id: string; role: string; createdAt: string; text: string }>;
     diffs: Array<{ file: string; additions: number; deletions: number }>;
   };
 };
 
+type StructuredSessionBrief = {
+  format: "tuiui.sessionBrief.v1";
+  executiveSummary: string;
+  initialUserRequest: string;
+  currentState: string;
+  completedWork: string[];
+  filesChanged: Array<{ path: string; summary: string }>;
+  risksBlockers: string[];
+  suggestedNextActions: string[];
+  raw: string;
+  parseErrors: string[];
+};
+
 type SidecarSummaryState = {
   implemented: boolean;
   status: "idle" | "running" | "completed" | "error";
-  method: "" | "opencode.session.fork+summarize" | "codex.startThread+summary" | "claude.query+forkSession";
+  method: "" | "opencode.session.fork+prompt" | "codex.startThread+summary" | "claude.query+forkSession";
   sourceSessionId: string;
   forkSessionId: string;
   forkPoint: string;
@@ -1034,7 +1048,7 @@ function renderSdkScreen(screen: HTMLElement, payload: SessionPayload) {
             <strong>Session brief</strong>
             <span data-session-brief-state></span>
           </header>
-          <pre data-session-brief-markdown></pre>
+          <div class="session-brief-content" data-session-brief-content></div>
         </section>
         <details class="sdk-diagnostics">
           <summary>Diagnostics</summary>
@@ -1125,14 +1139,14 @@ function updateSessionBrief(screen: HTMLElement, payload: SessionPayload) {
   const brief = selectSessionBrief(payload.sdk);
   const container = screen.querySelector<HTMLElement>("[data-testid='session-brief']");
   const state = screen.querySelector<HTMLElement>("[data-session-brief-state]");
-  const markdown = screen.querySelector<HTMLElement>("[data-session-brief-markdown]");
-  if (!container || !state || !markdown) {
+  const content = screen.querySelector<HTMLElement>("[data-session-brief-content]");
+  if (!container || !state || !content) {
     return;
   }
 
   container.dataset.briefState = brief.state;
   state.textContent = brief.label;
-  markdown.textContent = brief.markdown;
+  content.innerHTML = renderSessionBriefContent(brief);
 }
 
 function buildSdkYamlData(payload: SessionPayload) {
@@ -1166,6 +1180,7 @@ function buildSdkYamlData(payload: SessionPayload) {
       deletions: payload.sdk.summary.deletions,
       latestUserText: payload.sdk.summary.latestUserText,
       latestAssistantText: payload.sdk.summary.latestAssistantText,
+      sessionBrief: payload.sdk.summary.sessionBrief,
       transcript: payload.sdk.summary.transcript,
       diffs: payload.sdk.summary.diffs,
     } : null,
@@ -1191,7 +1206,8 @@ function selectSessionBrief(sdk: SessionSdkPayload) {
     return {
       state: "current",
       label: "current",
-      markdown: current.summary.latestAssistantText,
+      text: current.summary.latestAssistantText,
+      structured: current.summary.sessionBrief,
     };
   }
   const stale = completed[0];
@@ -1199,28 +1215,83 @@ function selectSessionBrief(sdk: SessionSdkPayload) {
     return {
       state: "stale",
       label: "stale",
-      markdown: stale.summary.latestAssistantText,
+      text: stale.summary.latestAssistantText,
+      structured: stale.summary.sessionBrief,
     };
   }
   if (sdk.sidecarSummary.status === "running") {
     return {
       state: "running",
       label: "running",
-      markdown: "Getting session brief...",
+      text: "Getting session brief...",
+      structured: null,
     };
   }
   if (sdk.sidecarSummary.status === "error") {
     return {
       state: "error",
       label: "error",
-      markdown: sdk.sidecarSummary.error || "Session brief failed.",
+      text: sdk.sidecarSummary.error || "Session brief failed.",
+      structured: null,
     };
   }
   return {
     state: "empty",
     label: "none",
-    markdown: "No session brief yet.",
+    text: "No session brief yet.",
+    structured: null,
   };
+}
+
+function renderSessionBriefContent(brief: ReturnType<typeof selectSessionBrief>) {
+  const structured = brief.structured;
+  if (!structured || structured.parseErrors.length) {
+    return `<pre>${escapeHtml(brief.text)}</pre>`;
+  }
+
+  return `
+    <div class="brief-section brief-section-primary">
+      <strong>Executive summary</strong>
+      <p>${escapeHtml(structured.executiveSummary || "No summary provided.")}</p>
+    </div>
+    <div class="brief-grid">
+      ${renderBriefTextSection("Initial request", structured.initialUserRequest)}
+      ${renderBriefTextSection("Current state", structured.currentState)}
+      ${renderBriefListSection("Completed work", structured.completedWork)}
+      ${renderBriefFilesSection(structured.filesChanged)}
+      ${renderBriefListSection("Risks / blockers", structured.risksBlockers)}
+      ${renderBriefListSection("Suggested next actions", structured.suggestedNextActions)}
+    </div>
+  `;
+}
+
+function renderBriefTextSection(title: string, text: string) {
+  return `
+    <section class="brief-section">
+      <strong>${escapeHtml(title)}</strong>
+      <p>${escapeHtml(text || "None.")}</p>
+    </section>
+  `;
+}
+
+function renderBriefListSection(title: string, items: string[]) {
+  return `
+    <section class="brief-section">
+      <strong>${escapeHtml(title)}</strong>
+      ${items.length ? `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : "<p>None.</p>"}
+    </section>
+  `;
+}
+
+function renderBriefFilesSection(files: StructuredSessionBrief["filesChanged"]) {
+  return `
+    <section class="brief-section">
+      <strong>Files changed</strong>
+      ${files.length ? `<ul>${files.map((file) => `
+        <li><code>${escapeHtml(file.path || "(unknown)")}</code>${file.summary ? ` ${escapeHtml(file.summary)}` : ""}</li>
+      `).join("")}</ul>` : "<p>None.</p>"}
+    </section>
+  `;
 }
 
 function mountYamlEditor(hostId: string, doc: string) {
