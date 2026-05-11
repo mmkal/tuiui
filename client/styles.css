@@ -1172,6 +1172,80 @@ pre {
   padding-top: 8px;
 }
 
+.chord-shortcuts {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 1px;
+}
+
+.chord-button {
+  min-height: 28px;
+  height: 28px;
+  padding: 0 9px;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.user-chord {
+  border-color: #64d2c8;
+}
+
+.preset-chord {
+  color: #c8d2df;
+}
+
+.chord-panel {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #303844;
+  border-radius: 8px;
+  background: #151a20;
+  padding: 8px;
+}
+
+.chord-panel[hidden] {
+  display: none;
+}
+
+.chord-panel-input-row,
+.chord-panel-send-row {
+  display: flex;
+  gap: 5px;
+  min-width: 0;
+}
+
+.chord-panel-input-row {
+  flex-wrap: wrap;
+}
+
+.chord-panel-input-row .secondary-button {
+  min-height: 28px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.chord-panel-send-row input {
+  min-width: 0;
+  height: 32px;
+  padding: 6px 8px;
+  font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.chord-panel-send-row input[name="label"] {
+  flex: 0 1 120px;
+}
+
+.chord-panel-send-row input[name="sequence"] {
+  flex: 1 1 180px;
+}
+
+.chord-panel-send-row button {
+  min-height: 32px;
+  white-space: nowrap;
+}
+
 textarea {
   min-height: 48px;
   height: 48px;
@@ -1398,6 +1472,16 @@ textarea {
     min-width: 34px;
     padding: 0;
     font-size: 16px;
+  }
+
+  .chord-panel-send-row {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .chord-panel-send-row input[name="label"],
+  .chord-panel-send-row input[name="sequence"] {
+    flex-basis: auto;
   }
 
   .overflow-key {
