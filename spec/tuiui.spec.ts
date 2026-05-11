@@ -25,7 +25,16 @@ const test = base.extend<{ ctx: FixtureContext }>({
   },
 });
 
-test("shows a page-load toast on each full document load", async ({ page, ctx }) => {
+test("does not show a page-load toast by default", async ({ page, ctx }) => {
+  await page.goto(ctx.baseUrl);
+
+  await page.waitForTimeout(200);
+  await expect(page.getByTestId("page-load-toast")).toHaveCount(0);
+});
+
+test("shows a page-load toast on each full document load when opted in", async ({ page }) => {
+  await using ctx = await createContext({ TUIUI_PAGE_LOAD_TOASTS: "1" });
+
   await page.goto(ctx.baseUrl);
 
   await expect(page.getByTestId("page-load-toast")).toContainText("Page loaded #1");
@@ -54,7 +63,9 @@ test("launches a TUI, translates boxes into semantic sections, and accepts compo
   await page.getByRole("textbox", { name: "Send stdin" }).fill("what is one plus two");
   await page.getByRole("button", { name: "Send" }).click();
 
-  await expect(page.getByTestId("semantic-section").filter({ hasText: "three" })).toBeVisible();
+  await expect(page.getByTestId("semantic-section").filter({ hasText: "Answer" }).filter({ hasText: "three" })).toBeVisible();
+  await expect(page.getByTestId("semantic-section").filter({ hasText: "me: what is one plus two" })).toBeVisible();
+  await expect(page.getByTestId("semantic-section").filter({ hasText: "agent: three" })).toBeVisible();
   await clickSessionMenuButton(page, "Summary");
   await expect(page.getByTestId("sdk-summary")).toContainText("No SDK adapter");
   await expect(page.getByTestId("tuishot-preview").locator("img")).toBeVisible();
@@ -247,6 +258,23 @@ test("keeps mobile session chrome compact without document scrolling", async ({ 
   await page.getByRole("textbox", { name: "Command" }).fill("scrollback-agent");
   await page.getByRole("button", { name: "Launch" }).click();
   await expect(page.getByTestId("rendered-terminal")).toContainText("scrollback line 80");
+  await expect(page.getByTestId("page-load-toast")).toBeVisible();
+  const toastPlacement = await page.evaluate(() => {
+    const toast = document.querySelector<HTMLElement>("[data-testid='page-load-toast']")!.getBoundingClientRect();
+    const menu = document.querySelector<HTMLElement>(".menu-button")!.getBoundingClientRect();
+    return {
+      toastLeft: toast.left,
+      toastRight: toast.right,
+      toastTop: toast.top,
+      menuBottom: menu.bottom,
+      intersectsMenu: !(toast.right < menu.left || toast.left > menu.right || toast.bottom < menu.top || toast.top > menu.bottom),
+    };
+  });
+  expect(toastPlacement.toastLeft).toBeGreaterThanOrEqual(8);
+  expect(toastPlacement.toastRight).toBeLessThanOrEqual(390 - 8);
+  expect(toastPlacement.toastTop).toBeGreaterThanOrEqual(toastPlacement.menuBottom);
+  expect(toastPlacement.intersectsMenu).toBe(false);
+  await expect(page.getByRole("button", { name: "Send" })).toContainText("↵");
 
   await expect.poll(async () => {
     return await page.evaluate(() => {
@@ -649,8 +677,8 @@ function countSerializedHtmlRows(html: string) {
   return html.match(/<div><span>/g)?.length || 0;
 }
 
-async function createContext() {
-  return await createContextWithPathPrefix("");
+async function createContext(envOverrides: Record<string, string> = {}) {
+  return await createContextWithPathPrefix("", envOverrides);
 }
 
 async function createContextWithCodexShimShadow() {
@@ -661,7 +689,7 @@ async function createContextWithCodexShimShadow() {
 process.stdout.write("shadowed repo-local codex\\n");
 setTimeout(() => process.exit(0), 100);
 `, { mode: 0o755 });
-  const ctx = await createContextWithPathPrefix(shadowBinDir);
+  const ctx = await createContextWithPathPrefix(shadowBinDir, {});
   return {
     ...ctx,
     async [Symbol.asyncDispose]() {
@@ -671,7 +699,7 @@ setTimeout(() => process.exit(0), 100);
   };
 }
 
-async function createContextWithPathPrefix(pathPrefix: string) {
+async function createContextWithPathPrefix(pathPrefix: string, envOverrides: Record<string, string>) {
   const rootDir = path.resolve(import.meta.dirname, "..");
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "tuiui-spec-"));
   const workspaceDir = path.join(tempRoot, "workspace");
@@ -692,6 +720,7 @@ async function createContextWithPathPrefix(pathPrefix: string) {
     PATH: pathParts.join(path.delimiter),
     HOME: path.join(tempRoot, "home"),
     NO_COLOR: "1",
+    ...envOverrides,
   };
   const server = spawn("bun", ["run", path.join(rootDir, "cli.ts"), "--host", "127.0.0.1", "--port", String(port)], {
     cwd: workspaceDir,
@@ -773,30 +802,45 @@ process.stdin.setEncoding("utf8");
 let input = "";
 let answer = "";
 let key = "";
+const messages = [];
+
+function line(text) {
+  return ("│ " + (text || " ") + "                              │").slice(0, 32) + "│\\r\\n";
+}
 
 function draw() {
   process.stdout.write("\\x1b[2J\\x1b[H");
   process.stdout.write("╭─ semantic-agent ─────────────╮\\r\\n");
   process.stdout.write("│ status idle                  │\\r\\n");
   process.stdout.write("╰──────────────────────────────╯\\r\\n");
+  if (messages.length > 0) {
+    process.stdout.write("\\r\\n╭─ Message history ────────────╮\\r\\n");
+    for (const message of messages.slice(-4)) {
+      process.stdout.write(line(message));
+    }
+    process.stdout.write("╰──────────────────────────────╯\\r\\n");
+  }
   process.stdout.write("\\r\\n");
   process.stdout.write("╭─ Ask anything ───────────────╮\\r\\n");
-  process.stdout.write(("│ " + (input || " ") + "                              │").slice(0, 32) + "│\\r\\n");
+  process.stdout.write(line(input));
   process.stdout.write("╰──────────────────────────────╯\\r\\n");
   if (answer) {
     process.stdout.write("\\r\\n╭─ Answer ─────────────────────╮\\r\\n");
-    process.stdout.write(("│ " + answer + "                              │").slice(0, 32) + "│\\r\\n");
+    process.stdout.write(line(answer));
     process.stdout.write("╰──────────────────────────────╯\\r\\n");
   }
   if (key) {
     process.stdout.write("\\r\\n╭─ Key ────────────────────────╮\\r\\n");
-    process.stdout.write(("│ " + key + "                              │").slice(0, 32) + "│\\r\\n");
+    process.stdout.write(line(key));
     process.stdout.write("╰──────────────────────────────╯\\r\\n");
   }
 }
 
 function submit() {
+  const submitted = input;
   answer = /one plus two/i.test(input) ? "three" : "heard " + input;
+  messages.push("me: " + submitted);
+  messages.push("agent: " + answer);
   input = "";
   draw();
 }
