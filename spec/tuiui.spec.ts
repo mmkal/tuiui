@@ -4,7 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { once } from "node:events";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { expect, test as base, type Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
+import { test as base } from "./test-helpers.ts";
 
 type FixtureContext = {
   rootDir: string;
