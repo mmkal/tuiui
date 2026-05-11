@@ -378,7 +378,7 @@ textarea:focus {
   color: #eef2f7;
   box-shadow: 0 16px 36px rgba(0, 0, 0, 0.35);
   padding: 10px 12px;
-  pointer-events: auto;
+  pointer-events: none;
   opacity: 0;
   transform: translateY(6px);
   transition: opacity 160ms ease, transform 160ms ease;
@@ -426,7 +426,8 @@ textarea:focus {
 
 .toolbar,
 .composer-actions,
-.keys {
+.keys,
+.voice-controls {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -515,6 +516,12 @@ textarea:focus {
   border-color: #64d2c8;
 }
 
+.voice-talk[aria-pressed="true"] {
+  background: #f3c969;
+  border-color: #f3c969;
+  color: #101418;
+}
+
 .icon-button.danger {
   color: #ffd3d3;
 }
@@ -523,6 +530,23 @@ textarea:focus {
   background: #20262e;
   color: #dce5ef;
   border-color: #3a4350;
+}
+
+.voice-controls {
+  flex: 1 1 260px;
+  min-width: min(100%, 240px);
+  justify-content: flex-end;
+}
+
+.voice-status {
+  min-width: 116px;
+  max-width: 260px;
+  overflow: hidden;
+  color: #9ca8b6;
+  font-size: 11px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-pill {
@@ -1200,6 +1224,80 @@ pre {
   padding-top: 8px;
 }
 
+.chord-shortcuts {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 1px;
+}
+
+.chord-button {
+  min-height: 28px;
+  height: 28px;
+  padding: 0 9px;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.user-chord {
+  border-color: #64d2c8;
+}
+
+.preset-chord {
+  color: #c8d2df;
+}
+
+.chord-panel {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #303844;
+  border-radius: 8px;
+  background: #151a20;
+  padding: 8px;
+}
+
+.chord-panel[hidden] {
+  display: none;
+}
+
+.chord-panel-input-row,
+.chord-panel-send-row {
+  display: flex;
+  gap: 5px;
+  min-width: 0;
+}
+
+.chord-panel-input-row {
+  flex-wrap: wrap;
+}
+
+.chord-panel-input-row .secondary-button {
+  min-height: 28px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.chord-panel-send-row input {
+  min-width: 0;
+  height: 32px;
+  padding: 6px 8px;
+  font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.chord-panel-send-row input[name="label"] {
+  flex: 0 1 120px;
+}
+
+.chord-panel-send-row input[name="sequence"] {
+  flex: 1 1 180px;
+}
+
+.chord-panel-send-row button {
+  min-height: 32px;
+  white-space: nowrap;
+}
+
 textarea {
   min-height: 48px;
   height: 48px;
@@ -1209,7 +1307,7 @@ textarea {
 
 .composer-actions {
   justify-content: space-between;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   min-width: 0;
 }
 
@@ -1224,7 +1322,7 @@ textarea {
 }
 
 .keys {
-  flex: 1;
+  flex: 1 1 230px;
   min-width: 0;
   flex-wrap: nowrap;
   gap: 4px;
@@ -1409,6 +1507,15 @@ textarea {
     gap: 6px;
   }
 
+  .keys,
+  .voice-controls {
+    flex: 1 1 auto;
+  }
+
+  .voice-controls {
+    justify-content: flex-start;
+  }
+
   #send {
     display: grid;
     place-items: center;
@@ -1417,6 +1524,16 @@ textarea {
     min-width: 34px;
     padding: 0;
     font-size: 16px;
+  }
+
+  .chord-panel-send-row {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .chord-panel-send-row input[name="label"],
+  .chord-panel-send-row input[name="sequence"] {
+    flex-basis: auto;
   }
 
   .overflow-key {

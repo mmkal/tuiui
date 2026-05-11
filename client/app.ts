@@ -6,8 +6,22 @@ import { vsCodeDark } from "@fsegurai/codemirror-theme-bundle";
 import { FitAddon } from "@xterm/addon-fit";
 import type { Terminal as XtermTerminal } from "@xterm/xterm";
 import { basicSetup } from "codemirror";
+import {
+  detectChordBinary,
+  parseChordSteps,
+  presetsForBinary,
+  type ChordBinary,
+} from "../src/chords.ts";
 import { stringify as stringifyYaml } from "yaml";
 import { showToast } from "./toast.ts";
+import {
+  createBrowserVoiceRecognizer,
+  createBrowserVoiceSpeaker,
+  createVoiceLoop,
+  type VoiceLoop,
+  type VoiceRecognizer,
+  type VoiceSpeaker,
+} from "./voice.ts";
 
 type SessionPayload = {
   id: string;
@@ -172,6 +186,25 @@ type LaunchSessionInput = {
   fakeAgent: string;
 };
 
+declare global {
+  interface Window {
+    __tuiuiVoiceTest?: {
+      recognizer?: VoiceRecognizer;
+      speaker?: VoiceSpeaker;
+      minReadbackDelayMs?: number;
+      now?: () => number;
+    };
+  }
+}
+
+type StoredChord = {
+  id: string;
+  binary: ChordBinary;
+  label: string;
+  sequence: string;
+  lastUsedAt: string;
+};
+
 const app = document.getElementById("app")!;
 let events: EventSource | null = null;
 let activeSession: SessionPayload | null = null;
@@ -191,6 +224,9 @@ let xtermLastStdoutEventId = 0;
 let xtermInputQueue = Promise.resolve();
 let xtermSyncQueue = Promise.resolve();
 let terminalScrollAnimationFrame: number | null = null;
+let voiceLoop: VoiceLoop | null = null;
+let unsubscribeVoiceLoop: (() => void) | null = null;
+let voiceReadbackTimer: number | null = null;
 
 void boot();
 
@@ -251,6 +287,10 @@ async function renderRoute() {
   destroyXterm();
   activeSession = null;
   destroyDataEditor();
+  unsubscribeVoiceLoop?.();
+  unsubscribeVoiceLoop = null;
+  voiceLoop = null;
+  clearVoiceReadbackTimer();
 
   const sessionMatch = location.pathname.match(/^\/sessions\/([^/]+)$/);
   if (sessionMatch) {
@@ -460,6 +500,7 @@ async function renderHome() {
 async function renderSession(sessionId: string) {
   const payload = await api<SessionPayload>(`/api/sessions/${sessionId}`);
   activeSession = payload;
+  const binary = detectChordBinary(payload.command, payload.args, payload.sdk.provider);
 
   app.innerHTML = `
     <main class="layout session-layout">
@@ -504,6 +545,22 @@ async function renderSession(sessionId: string) {
       </section>
       <section class="composer" aria-label="Session input">
         <textarea id="stdin" aria-label="Send stdin" rows="3" spellcheck="false"></textarea>
+        <div class="chord-shortcuts" role="group" aria-label="Shortcut chords" data-chord-binary="${escapeAttr(binary)}">
+          ${renderChordShortcuts(binary)}
+        </div>
+        <form id="chord-form" class="chord-panel" aria-label="Create chord" hidden>
+          <div class="chord-panel-input-row">
+            ${["ctrl+", "shift+", "alt+", "/", "tab", "esc", ";enter", "backspace", "up", "down", "left", "right"].map((insert) => `
+              <button type="button" class="secondary-button" data-chord-insert="${escapeAttr(insert)}">${escapeHtml(formatChordHelper(insert))}</button>
+            `).join("")}
+          </div>
+          <div class="chord-panel-send-row">
+            <input name="label" aria-label="Chord label" autocomplete="off" placeholder="Label" />
+            <input name="sequence" aria-label="Chord sequence" autocomplete="off" placeholder="esc;esc or /model;enter" required />
+            <button type="submit">Save + Send</button>
+            <button type="button" class="secondary-button" data-action="cancel-chord">Cancel</button>
+          </div>
+        </form>
         <div class="composer-actions">
           <div class="keys" role="group" aria-label="Keys">
             ${renderKeyButton("esc", "Esc")}
@@ -522,6 +579,14 @@ async function renderSession(sessionId: string) {
               </div>
             </details>
           </div>
+          <div class="voice-controls" role="group" aria-label="Voice mode">
+          <button type="button" class="secondary-button" data-action="toggle-chord" aria-expanded="false">Chord</button>
+          <div class="voice-controls" role="group" aria-label="Voice mode">
+            <button type="button" id="voice-talk" class="icon-button voice-talk" aria-label="Push to talk" data-voice-status="idle">Talk</button>
+            <button type="button" id="voice-cancel" class="icon-button" aria-label="Cancel listening">Cancel</button>
+            <button type="button" id="voice-stop" class="icon-button" aria-label="Cancel speech playback">Audio</button>
+            <output id="voice-status" class="voice-status" data-testid="voice-status">Voice ready</output>
+          </div>
           <button type="button" id="send" aria-label="Send" title="Send">
             <span aria-hidden="true">↵</span>
           </button>
@@ -538,6 +603,9 @@ async function renderSession(sessionId: string) {
 function bindSessionControls(sessionId: string) {
   const textarea = document.getElementById("stdin") as HTMLTextAreaElement;
   const sendButton = document.getElementById("send") as HTMLButtonElement;
+  const chordForm = document.getElementById("chord-form") as HTMLFormElement;
+  const chordToggle = document.querySelector<HTMLButtonElement>("[data-action='toggle-chord']")!;
+  setupVoiceControls(sessionId, textarea);
 
   sendButton.addEventListener("click", () => {
     void sendComposer(sessionId);
@@ -569,6 +637,57 @@ function bindSessionControls(sessionId: string) {
     button.addEventListener("click", () => {
       textarea.blur();
       void sendKey(sessionId, button.dataset.key || "");
+    });
+  });
+
+  chordToggle.addEventListener("click", () => {
+    const nextHidden = !chordForm.hidden;
+    chordForm.hidden = nextHidden;
+    chordToggle.setAttribute("aria-expanded", String(!nextHidden));
+    if (!nextHidden) {
+      const sequenceInput = chordForm.elements.namedItem("sequence") as HTMLInputElement;
+      sequenceInput.focus();
+    }
+  });
+
+  document.querySelector<HTMLButtonElement>("[data-action='cancel-chord']")?.addEventListener("click", () => {
+    chordForm.hidden = true;
+    chordToggle.setAttribute("aria-expanded", "false");
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-chord-insert]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const sequenceInput = chordForm.elements.namedItem("sequence") as HTMLInputElement;
+      sequenceInput.value += button.dataset.chordInsert || "";
+      sequenceInput.focus();
+    });
+  });
+
+  chordForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const binary = detectChordBinary(activeSession?.command || "", activeSession?.args || [], activeSession?.sdk.provider || "");
+    const labelInput = chordForm.elements.namedItem("label") as HTMLInputElement;
+    const sequenceInput = chordForm.elements.namedItem("sequence") as HTMLInputElement;
+    const sequence = sequenceInput.value.trim();
+    if (!sequence) {
+      return;
+    }
+    const chord = saveStoredChord(binary, labelInput.value, sequence);
+    refreshChordShortcuts(binary);
+    labelInput.value = "";
+    sequenceInput.value = "";
+    chordForm.hidden = true;
+    chordToggle.setAttribute("aria-expanded", "false");
+    void sendChordSequence(sessionId, chord.sequence, chord.id);
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-chord-sequence]").forEach((button) => {
+    button.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+    });
+    button.addEventListener("click", () => {
+      textarea.blur();
+      void sendChordSequence(sessionId, button.dataset.chordSequence || "", button.dataset.chordId || "");
     });
   });
 
@@ -605,6 +724,83 @@ function bindSessionControls(sessionId: string) {
   });
 }
 
+function setupVoiceControls(sessionId: string, textarea: HTMLTextAreaElement) {
+  unsubscribeVoiceLoop?.();
+  voiceLoop = createVoiceLoop({
+    recognizer: window.__tuiuiVoiceTest?.recognizer || createBrowserVoiceRecognizer(),
+    speaker: window.__tuiuiVoiceTest?.speaker || createBrowserVoiceSpeaker(),
+    now: window.__tuiuiVoiceTest?.now || (() => Date.now()),
+    minReadbackDelayMs: Number(window.__tuiuiVoiceTest?.minReadbackDelayMs || 700),
+    async sendTranscript(text) {
+      textarea.value = text;
+      await api(`/api/sessions/${sessionId}/send`, {
+        method: "POST",
+        body: JSON.stringify({ text, submit: true }),
+      });
+      textarea.value = "";
+    },
+  });
+  unsubscribeVoiceLoop = voiceLoop.subscribe(updateVoiceControls);
+
+  const talk = document.getElementById("voice-talk") as HTMLButtonElement | null;
+  const cancel = document.getElementById("voice-cancel") as HTMLButtonElement | null;
+  const stop = document.getElementById("voice-stop") as HTMLButtonElement | null;
+  if (!talk || !cancel || !stop) {
+    return;
+  }
+  talk.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    voiceLoop?.startListening();
+  });
+  talk.addEventListener("pointerup", (event) => {
+    event.preventDefault();
+    voiceLoop?.stopListening();
+  });
+  talk.addEventListener("pointercancel", () => {
+    voiceLoop?.cancelListening();
+  });
+  talk.addEventListener("keydown", (event) => {
+    if (event.key === " " || event.key === "Enter") {
+      event.preventDefault();
+      voiceLoop?.startListening();
+    }
+  });
+  talk.addEventListener("keyup", (event) => {
+    if (event.key === " " || event.key === "Enter") {
+      event.preventDefault();
+      voiceLoop?.stopListening();
+    }
+  });
+  cancel.addEventListener("click", () => {
+    voiceLoop?.cancelListening();
+  });
+  stop.addEventListener("click", () => {
+    voiceLoop?.stopSpeaking();
+  });
+}
+
+function updateVoiceControls(state: VoiceLoop["state"]) {
+  const talk = document.getElementById("voice-talk") as HTMLButtonElement | null;
+  const cancel = document.getElementById("voice-cancel") as HTMLButtonElement | null;
+  const stop = document.getElementById("voice-stop") as HTMLButtonElement | null;
+  const status = document.getElementById("voice-status") as HTMLOutputElement | null;
+  if (talk) {
+    talk.disabled = state.status === "unsupported";
+    talk.dataset.voiceStatus = state.status;
+    talk.setAttribute("aria-pressed", String(state.status === "listening" || state.status === "transcribing"));
+  }
+  if (cancel) {
+    cancel.disabled = state.status !== "listening" && state.status !== "transcribing";
+  }
+  if (stop) {
+    stop.disabled = state.status === "unsupported";
+  }
+  if (status) {
+    status.value = state.transcript ? `${state.message}: ${state.transcript}` : state.message;
+    status.textContent = status.value;
+  }
+}
+
 function closeSessionMenu() {
   document.querySelector<HTMLDetailsElement>(".session-menu")?.removeAttribute("open");
 }
@@ -623,6 +819,36 @@ async function sendKey(sessionId: string, key: string) {
   await api(`/api/sessions/${sessionId}/key`, {
     method: "POST",
     body: JSON.stringify({ key }),
+  });
+}
+
+async function sendChordSequence(sessionId: string, sequence: string, chordId: string) {
+  const steps = parseChordSteps(sequence);
+  for (const step of steps) {
+    await api(`/api/sessions/${sessionId}/send`, {
+      method: "POST",
+      body: JSON.stringify({ text: step.text, submit: step.submit }),
+    });
+  }
+  if (chordId.startsWith("user-")) {
+    markStoredChordUsed(chordId);
+  }
+}
+
+function refreshChordShortcuts(binary: ChordBinary) {
+  const container = document.querySelector<HTMLElement>("[aria-label='Shortcut chords']");
+  if (!container) {
+    return;
+  }
+  container.innerHTML = renderChordShortcuts(binary);
+  document.querySelectorAll<HTMLButtonElement>("[data-chord-sequence]").forEach((button) => {
+    button.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+    });
+    button.addEventListener("click", () => {
+      document.getElementById("stdin")?.blur();
+      void sendChordSequence(activeSession?.id || "", button.dataset.chordSequence || "", button.dataset.chordId || "");
+    });
   });
 }
 
@@ -709,6 +935,32 @@ function renderSessionPayload(payload: SessionPayload | null) {
   if (stdoutLog) {
     stdoutLog.textContent = payload.stdoutEvents.map((event) => event.displayText ? `[${formatTime(event.createdAt)}] ${event.displayText}` : "").filter(Boolean).join("\n\n");
   }
+  voiceLoop?.observePayload(payload);
+  scheduleVoiceReadbackCheck(payload);
+}
+
+function scheduleVoiceReadbackCheck(payload: SessionPayload) {
+  if (!voiceLoop?.state.awaitingReadback || payload.lifecycle !== "running") {
+    clearVoiceReadbackTimer();
+    return;
+  }
+  if (voiceReadbackTimer !== null) {
+    return;
+  }
+  voiceReadbackTimer = window.setTimeout(() => {
+    voiceReadbackTimer = null;
+    void api<SessionPayload>(`/api/sessions/${payload.id}`)
+      .then(renderSessionPayload)
+      .catch(() => undefined);
+  }, payload.status === "idle" ? 350 : 1_100);
+}
+
+function clearVoiceReadbackTimer() {
+  if (voiceReadbackTimer === null) {
+    return;
+  }
+  window.clearTimeout(voiceReadbackTimer);
+  voiceReadbackTimer = null;
 }
 
 function scrollTerminalByStep(direction: number) {
@@ -1552,6 +1804,118 @@ function renderSessionLink(session: any) {
 function renderKeyButton(key: string, label: string, className = "") {
   const classes = ["icon-button", "key-button", className].filter(Boolean).join(" ");
   return `<button type="button" class="${escapeAttr(classes)}" data-key="${escapeAttr(key)}" aria-label="${escapeAttr(key)}">${escapeHtml(label)}</button>`;
+}
+
+function renderChordShortcuts(binary: ChordBinary) {
+  const userChords = readStoredChords()
+    .filter((chord) => chord.binary === binary)
+    .sort((left, right) => right.lastUsedAt.localeCompare(left.lastUsedAt))
+    .slice(0, 5);
+  const userSequences = new Set(userChords.map((chord) => chord.sequence.toLowerCase()));
+  const presetChords = presetsForBinary(binary).filter((preset) => !userSequences.has(preset.sequence.toLowerCase())).slice(0, 8);
+  const buttons = [
+    ...userChords.map((chord) => renderChordButton({
+      id: chord.id,
+      label: chord.label,
+      sequence: chord.sequence,
+      userDefined: true,
+    })),
+    ...presetChords.map((preset) => renderChordButton({
+      id: preset.id,
+      label: preset.label,
+      sequence: preset.sequence,
+      userDefined: false,
+    })),
+  ];
+  return buttons.join("");
+}
+
+function renderChordButton(input: { id: string; label: string; sequence: string; userDefined: boolean }) {
+  const classes = ["secondary-button", "chord-button", input.userDefined ? "user-chord" : "preset-chord"].join(" ");
+  return `
+    <button
+      type="button"
+      class="${escapeAttr(classes)}"
+      data-chord-id="${escapeAttr(input.id)}"
+      data-chord-sequence="${escapeAttr(input.sequence)}"
+      title="${escapeAttr(input.sequence)}"
+    >${escapeHtml(input.label)}</button>
+  `;
+}
+
+function formatChordHelper(value: string) {
+  switch (value) {
+    case ";enter":
+      return "Enter";
+    case "backspace":
+      return "Back";
+    case "up":
+      return "↑";
+    case "down":
+      return "↓";
+    case "left":
+      return "←";
+    case "right":
+      return "→";
+    default:
+      return value;
+  }
+}
+
+function readStoredChords() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem("tuiui-user-chords") || "[]") as Partial<StoredChord>[];
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .filter((chord): chord is StoredChord => {
+        return typeof chord.id === "string"
+          && isChordBinary(chord.binary)
+          && typeof chord.label === "string"
+          && typeof chord.sequence === "string"
+          && typeof chord.lastUsedAt === "string";
+      })
+      .slice(0, 50);
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredChords(chords: StoredChord[]) {
+  localStorage.setItem("tuiui-user-chords", JSON.stringify(chords.slice(0, 50)));
+}
+
+function saveStoredChord(binary: ChordBinary, label: string, sequence: string) {
+  const now = new Date().toISOString();
+  const normalizedSequence = sequence.trim();
+  const normalizedLabel = (label.trim() || normalizedSequence).slice(0, 40);
+  const existing = readStoredChords().filter((chord) => {
+    return !(chord.binary === binary && chord.sequence.toLowerCase() === normalizedSequence.toLowerCase());
+  });
+  const chord = {
+    id: `user-${binary || "common"}-${Date.now().toString(36)}`,
+    binary,
+    label: normalizedLabel,
+    sequence: normalizedSequence,
+    lastUsedAt: now,
+  };
+  writeStoredChords([chord, ...existing]);
+  return chord;
+}
+
+function markStoredChordUsed(id: string) {
+  const chords = readStoredChords();
+  const chord = chords.find((item) => item.id === id);
+  if (!chord) {
+    return;
+  }
+  chord.lastUsedAt = new Date().toISOString();
+  writeStoredChords(chords.sort((left, right) => right.lastUsedAt.localeCompare(left.lastUsedAt)));
+}
+
+function isChordBinary(value: unknown): value is ChordBinary {
+  return value === "" || value === "codex" || value === "opencode" || value === "claude";
 }
 
 function firstLine(text: string) {

@@ -49,8 +49,17 @@ import {
   type SessionSdkPayload,
 } from "./src/opencode-sdk.ts";
 import { createSessionId } from "./src/session-id.ts";
+import { resolveNamedKeySequence } from "./src/chords.ts";
 import { analyzeTerminalScreen, type SemanticScreen } from "./src/semantic-screen.ts";
 import { analyzeTerminalBlocks, type TerminalBlockModel } from "./src/terminal-blocks.ts";
+import {
+  createTmuxBackend,
+  reconnectTmuxBackend,
+  resolveSessionBackend,
+  tmuxHasSession,
+  type SessionBackendName,
+  type TmuxBackendHandle,
+} from "./src/tmux-backend.ts";
 import { renderTerminalShotSvg } from "./src/tuishot.ts";
 
 if (typeof Bun === "undefined") {
@@ -114,7 +123,7 @@ type RuntimeSession = {
   terminal: HeadlessTerminal;
   serializer: SerializeAddon;
   outputDecoder: StringDecoder;
-  process: any;
+  backend: SessionBackendHandle;
   writeQueue: Promise<void>;
   renderedText: string;
   renderedHtml: string;
@@ -129,6 +138,18 @@ type RuntimeSession = {
   fakeAgent: FakeAgent | null;
 };
 
+type BunPtyBackendHandle = {
+  name: "bun";
+  process: any;
+  exited: Promise<number | null>;
+  write(input: string): void;
+  resize(cols: number, rows: number): void;
+  kill(signal?: string): void;
+  dispose(): Promise<void>;
+};
+
+type SessionBackendHandle = BunPtyBackendHandle | TmuxBackendHandle;
+
 type CreateSessionInput = {
   command: string;
   args: string[];
@@ -137,6 +158,7 @@ type CreateSessionInput = {
   cols: number;
   rows: number;
   fakeAgent: AgentName | "";
+  backend: SessionBackendName;
 };
 
 type ServerState = {
@@ -173,6 +195,7 @@ if (cli.rest.length > 0) {
     cols: defaultCols,
     rows: defaultRows,
     fakeAgent: cli.fakeAgent,
+    backend: cli.backend,
   });
   const sessionUrls = accessBaseUrls.map((url) => `${url}/sessions/${session.id}`);
   process.stdout.write(`${sessionUrls.join("\n")}\n`);
@@ -265,6 +288,7 @@ async function handleApiRequest(state: ServerState, request: Request, url: URL):
       cols: Number(body.cols || defaultCols),
       rows: Number(body.rows || defaultRows),
       fakeAgent: isAgentName(body.fakeAgent) ? body.fakeAgent : "",
+      backend: resolveBackendForLaunch(body.backend),
     });
     return Response.json({ id: session.id, url: `${baseUrl}/sessions/${session.id}` });
   }
@@ -274,7 +298,7 @@ async function handleApiRequest(state: ServerState, request: Request, url: URL):
     return new Response("not found", { status: 404 });
   }
 
-  const session = state.sessions.get(match[1] || "");
+  const session = state.sessions.get(match[1] || "") || await reconnectSession(state, match[1] || "");
   if (!session) {
     return Response.json({ error: "unknown session" }, { status: 404 });
   }
@@ -409,7 +433,7 @@ async function createSession(input: CreateSessionInput) {
     terminal,
     serializer,
     outputDecoder: new StringDecoder("utf8"),
-    process: null,
+    backend: createPendingBackend(),
     writeQueue: Promise.resolve(),
     renderedText: "",
     renderedHtml: "",
@@ -426,20 +450,22 @@ async function createSession(input: CreateSessionInput) {
 
   state.sessions.set(id, session);
 
-  session.process = Bun.spawn([command, ...args], {
+  session.backend = await createSessionBackend(input.backend, {
+    id,
+    command,
+    args,
     cwd,
     env,
-    terminal: {
-      cols,
-      rows,
-      data(_term: unknown, chunk: string | Uint8Array) {
-        const text = typeof chunk === "string" ? chunk : session.outputDecoder.write(Buffer.from(chunk));
-        session.writeQueue = session.writeQueue.then(() => appendOutput(state, session, text));
-      },
+    createdAt: now,
+    cols,
+    rows,
+    onData(chunk) {
+      const text = typeof chunk === "string" ? chunk : session.outputDecoder.write(Buffer.from(chunk));
+      session.writeQueue = session.writeQueue.then(() => appendOutput(state, session, text));
     },
   });
 
-  session.process.exited.then((exitCode: number) => {
+  session.backend.exited.then((exitCode: number | null) => {
     session.writeQueue = session.writeQueue
       .then(async () => {
         const flushed = session.outputDecoder.end();
@@ -459,6 +485,162 @@ async function createSession(input: CreateSessionInput) {
 
   publishSession(session);
   return session;
+}
+
+async function reconnectSession(state: ServerState, id: string) {
+  if (!id || !tmuxHasSession(id)) {
+    return null;
+  }
+  let session: RuntimeSession | null = null;
+  const reconnected = await reconnectTmuxBackend({
+    id,
+    onData(chunk) {
+      if (!session) {
+        return;
+      }
+      session.writeQueue = session.writeQueue.then(() => appendOutput(state, session!, chunk));
+    },
+  });
+  if (!reconnected) {
+    return null;
+  }
+
+  const metadata = reconnected.metadata;
+  const cols = Math.max(40, Math.min(240, Math.round(metadata.cols)));
+  const rows = Math.max(12, Math.min(80, Math.round(metadata.rows)));
+  const terminal = new HeadlessTerminal({ cols, rows, scrollback: 2_000, allowProposedApi: true });
+  const serializer = new SerializeAddon();
+  terminal.loadAddon(serializer);
+  const sdk = await prepareSessionSdk(metadata.command, metadata.args, minimalEnv(process.env));
+  const now = new Date().toISOString();
+  session = {
+    id,
+    title: path.basename(sdk.command),
+    command: sdk.command,
+    args: sdk.args,
+    cwd: metadata.cwd,
+    env: minimalEnv(process.env),
+    createdAt: metadata.createdAt,
+    updatedAt: now,
+    lastOutputAt: now,
+    lifecycle: "running",
+    exitCode: null,
+    cols,
+    rows,
+    terminal,
+    serializer,
+    outputDecoder: new StringDecoder("utf8"),
+    backend: reconnected.handle,
+    writeQueue: Promise.resolve(),
+    renderedText: "",
+    renderedHtml: "",
+    renderedAnsi: "",
+    blocks: analyzeTerminalBlocks(terminal),
+    semantic: analyzeTerminalScreen("", { cols, rows }),
+    sdk: sdk.payload,
+    sdkSummaryJob: null,
+    stdinEvents: [],
+    stdoutEvents: [],
+    subscribers: new Set(),
+    fakeAgent: null,
+  };
+  state.sessions.set(id, session);
+  if (reconnected.handle.initialCapture) {
+    await appendOutput(state, session, reconnected.handle.initialCapture);
+  }
+  reconnected.handle.exited.then((exitCode) => {
+    session!.writeQueue = session!.writeQueue
+      .then(async () => {
+        const flushed = session!.outputDecoder.end();
+        if (flushed) {
+          await appendOutput(state, session!, flushed);
+        }
+        session!.lifecycle = "exited";
+        session!.exitCode = exitCode;
+        session!.updatedAt = new Date().toISOString();
+        publishSession(session!);
+      })
+      .catch((error: unknown) => {
+        console.error(error);
+      });
+  });
+  publishSession(session);
+  return session;
+}
+
+async function createSessionBackend(inputBackend: SessionBackendName, input: {
+  id: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  env: Record<string, string>;
+  createdAt: string;
+  cols: number;
+  rows: number;
+  onData(chunk: string | Uint8Array): void;
+}): Promise<SessionBackendHandle> {
+  if (inputBackend === "tmux") {
+    return await createTmuxBackend({
+      id: input.id,
+      command: input.command,
+      args: input.args,
+      cwd: input.cwd,
+      env: input.env,
+      createdAt: input.createdAt,
+      cols: input.cols,
+      rows: input.rows,
+      onData(chunk) {
+        input.onData(chunk);
+      },
+    });
+  }
+
+  const child: any = Bun.spawn([input.command, ...input.args], {
+    cwd: input.cwd,
+    env: input.env,
+    terminal: {
+      cols: input.cols,
+      rows: input.rows,
+      data(_term: unknown, chunk: string | Uint8Array) {
+        input.onData(chunk);
+      },
+    },
+  });
+  return {
+    name: "bun",
+    process: child,
+    exited: child.exited,
+    write(text: string) {
+      child.terminal.write(text);
+    },
+    resize(cols: number, rows: number) {
+      child.terminal.resize(cols, rows);
+    },
+    kill(signal?: string) {
+      child.kill((signal || "SIGTERM") as any);
+    },
+    async dispose() {},
+  };
+}
+
+function createPendingBackend(): SessionBackendHandle {
+  return {
+    name: "bun",
+    process: null,
+    exited: Promise.resolve(null),
+    write() {
+      throw new Error("session backend is not ready");
+    },
+    resize() {
+      throw new Error("session backend is not ready");
+    },
+    kill() {},
+    async dispose() {},
+  };
+}
+
+async function writeSessionBackend(session: RuntimeSession, text: string) {
+  await session.backend.write(text);
 }
 
 async function appendOutput(state: ServerState, session: RuntimeSession, chunk: string) {
@@ -526,7 +708,7 @@ async function sendToSession(state: ServerState, session: RuntimeSession, text: 
   }
 
   if (submit && usesLfCrSubmit(session.command) && text) {
-    session.process.terminal.write(text);
+    await writeSessionBackend(session, text);
     await writeLfCrSubmit(session);
     publishSession(session);
     return;
@@ -538,15 +720,15 @@ async function sendToSession(state: ServerState, session: RuntimeSession, text: 
     return;
   }
 
-  session.process.terminal.write(submit ? normalizeInput(text) : text);
+  await writeSessionBackend(session, submit ? normalizeInput(text) : text);
   publishSession(session);
 }
 
 async function writeLfCrSubmit(session: RuntimeSession) {
   await delay(80);
-  session.process.terminal.write("\n");
+  await writeSessionBackend(session, "\n");
   await delay(80);
-  session.process.terminal.write("\r");
+  await writeSessionBackend(session, "\r");
 }
 
 function normalizeInput(text: string) {
@@ -558,7 +740,7 @@ async function resizeSession(session: RuntimeSession, cols: number, rows: number
   session.cols = Math.max(40, Math.min(240, Math.round(cols)));
   session.rows = Math.max(12, Math.min(80, Math.round(rows)));
   session.terminal.resize(session.cols, session.rows);
-  session.process.terminal.resize(session.cols, session.rows);
+  await session.backend.resize(session.cols, session.rows);
   session.renderedText = renderTerminalText(session);
   session.renderedHtml = renderTerminalHtml(session);
   session.renderedAnsi = session.serializer.serialize({ scrollback: 1000 });
@@ -572,12 +754,12 @@ async function killSession(session: RuntimeSession) {
     return;
   }
   try {
-    session.process.terminal.write("\x03");
+    await writeSessionBackend(session, "\x03");
   } catch {
   }
   await delay(150);
   try {
-    session.process.kill("SIGTERM");
+    await session.backend.kill("SIGTERM");
   } catch {
   }
 }
@@ -1813,32 +1995,7 @@ function sanitizeTerminalChunk(chunk: string) {
 }
 
 function resolveKeySequence(key: string) {
-  switch (key.toLowerCase()) {
-    case "esc":
-    case "escape":
-      return "\x1b";
-    case "tab":
-      return "\t";
-    case "enter":
-    case "return":
-      return "\r";
-    case "backspace":
-      return "\x7f";
-    case "up":
-      return "\x1b[A";
-    case "down":
-      return "\x1b[B";
-    case "left":
-      return "\x1b[D";
-    case "right":
-      return "\x1b[C";
-    case "ctrl+c":
-      return "\x03";
-    case "ctrl+d":
-      return "\x04";
-    default:
-      return key;
-  }
+  return resolveNamedKeySequence(key);
 }
 
 function minimalEnv(env: NodeJS.ProcessEnv) {
@@ -1872,6 +2029,13 @@ function isPackageBinPath(value: string) {
 
 function isAgentName(value: unknown): value is AgentName {
   return value === "opencode" || value === "claude" || value === "codex";
+}
+
+function resolveBackendForLaunch(value: unknown): SessionBackendName {
+  if (typeof value === "string" && value.trim()) {
+    return resolveSessionBackend(value);
+  }
+  return resolveSessionBackend(String(process.env.TUIUI_SESSION_BACKEND || ""));
 }
 
 function getAccessBaseUrls(port: number, bindHost: string, fallbackBaseUrl: string) {
@@ -1915,6 +2079,7 @@ function parseCliArgs(argv: string[]) {
   let host = String(process.env.TUIUI_HOST || defaultBindHost);
   let open = false;
   let fakeAgent: AgentName | "" = "";
+  let backend = resolveBackendForLaunch("");
   const rest: string[] = [];
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -1942,10 +2107,15 @@ function parseCliArgs(argv: string[]) {
       index += 1;
       continue;
     }
+    if (arg === "--backend") {
+      backend = resolveSessionBackend(String(argv[index + 1] || ""));
+      index += 1;
+      continue;
+    }
     rest.push(arg);
   }
 
-  return { port, host, open, fakeAgent, rest };
+  return { port, host, open, fakeAgent, backend, rest };
 }
 
 function openUrl(url: string) {
@@ -1961,6 +2131,7 @@ function openUrl(url: string) {
 async function shutdown(runningServer: ReturnType<typeof Bun.serve>, state: ServerState) {
   for (const session of state.sessions.values()) {
     await killSession(session).catch(() => {});
+    await session.backend.dispose().catch(() => {});
     if (session.fakeAgent) {
       await Promise.resolve(session.fakeAgent[Symbol.asyncDispose]()).catch(() => {});
     }
