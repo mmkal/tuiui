@@ -149,8 +149,7 @@ test("sends named key chords separately from the composer", async ({ page, ctx }
 });
 
 test("push-to-talk sends a transcript and reads back the idle result without a real microphone", async ({ page, ctx }) => {
-  await page.goto(ctx.baseUrl);
-  await page.evaluate(() => {
+  await page.addInitScript(() => {
     const spoken: string[] = [];
     let handlers: any = null;
     (window as any).__voiceSpoken = spoken;
@@ -182,9 +181,7 @@ test("push-to-talk sends a transcript and reads back the idle result without a r
     };
   });
 
-  await page.getByRole("textbox", { name: "Command" }).fill("semantic-agent");
-  await page.getByRole("button", { name: "Launch" }).click();
-  await expect(page.getByTestId("rendered-terminal")).toContainText("Ask anything");
+  await launchFakeCodex(page, ctx);
 
   await page.getByRole("button", { name: "Push to talk" }).dispatchEvent("pointerdown");
   await expect(page.getByTestId("voice-status")).toContainText("Listening");
