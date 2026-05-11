@@ -525,16 +525,26 @@ async function sendToSession(state: ServerState, session: RuntimeSession, text: 
 
   if (submit && usesLfCrSubmit(session.command) && text) {
     session.process.terminal.write(text);
-    await delay(80);
-    session.process.terminal.write("\n");
-    await delay(80);
-    session.process.terminal.write("\r");
+    await writeLfCrSubmit(session);
+    publishSession(session);
+    return;
+  }
+
+  if (!submit && usesLfCrSubmit(session.command) && text === "\r") {
+    await writeLfCrSubmit(session);
     publishSession(session);
     return;
   }
 
   session.process.terminal.write(submit ? normalizeInput(text) : text);
   publishSession(session);
+}
+
+async function writeLfCrSubmit(session: RuntimeSession) {
+  await delay(80);
+  session.process.terminal.write("\n");
+  await delay(80);
+  session.process.terminal.write("\r");
 }
 
 function normalizeInput(text: string) {
