@@ -7,7 +7,8 @@ When a pull request would benefit from visual review, include screenshots or sho
 1. Open the pull request in GitHub with Playwriter.
 2. Edit the PR body or a comment.
 3. Click the editor's `Attach files` button, choose the local image/video, and wait for GitHub to insert a `https://github.com/user-attachments/assets/...` URL.
-4. Save the edit. GitHub will render supported videos inline as a player.
+4. Put the raw attachment URL on its own paragraph, not inside Markdown link syntax. Use `https://github.com/user-attachments/assets/...`, not `[video.webm](https://github.com/user-attachments/assets/...)`.
+5. Save the edit. GitHub will render supported videos inline as a player.
 
 The GitHub CLI can edit the PR body once you already have an attachment URL, but it does not provide an equivalent generic upload command for markdown attachments.
 

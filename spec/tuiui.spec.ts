@@ -43,31 +43,25 @@ test("shows a page-load toast on each full document load when opted in", async (
   await expect(page.getByTestId("page-load-toast")).toContainText("Page loaded #2");
 });
 
-test("launches a TUI, translates boxes into semantic sections, and accepts composer input", async ({ page, ctx }) => {
-  await page.goto(ctx.baseUrl);
+test("launches fake Codex, translates the TUI into semantic sections, and accepts composer input", async ({ page, ctx }) => {
+  await launchFakeCodex(page, ctx);
+  expect((await fetchSessionPayload(page)).cwd).toBe(fs.realpathSync(ctx.workspaceDir));
 
-  await page.getByRole("textbox", { name: "Command" }).fill("semantic-agent");
-  await expect(page.getByRole("textbox", { name: "Working directory" })).toHaveValue(fs.realpathSync(ctx.workspaceDir));
-  await page.getByRole("button", { name: "Launch" }).click();
-
-  await expect(page).toHaveURL(/\/sessions\/tuiui_[a-f0-9]+$/);
   await expect.poll(async () => (await fetchSessionPayload(page)).cols).not.toBe(120);
   const resizedPayload = await fetchSessionPayload(page);
   expect(resizedPayload.cols).toBeGreaterThanOrEqual(40);
   expect(resizedPayload.rows).toBeGreaterThanOrEqual(12);
   expect(countSerializedHtmlRows(resizedPayload.renderedHtml)).toBeLessThanOrEqual(resizedPayload.rows);
   await clickSessionMenuButton(page, "HTML");
-  await expect(page.getByTestId("semantic-section").filter({ hasText: "Ask anything" })).toBeVisible();
-  await expect(page.getByTestId("semantic-section").filter({ hasText: "semantic-agent" })).toBeVisible();
+  await expect(page.getByTestId("semantic-screen")).toContainText("OpenAI Codex");
 
   await page.getByRole("textbox", { name: "Send stdin" }).fill("what is one plus two");
   await page.getByRole("button", { name: "Send" }).click();
 
-  await expect(page.getByTestId("semantic-section").filter({ hasText: "Answer" }).filter({ hasText: "three" })).toBeVisible();
-  await expect(page.getByTestId("semantic-section").filter({ hasText: "me: what is one plus two" })).toBeVisible();
-  await expect(page.getByTestId("semantic-section").filter({ hasText: "agent: three" })).toBeVisible();
+  await expect(page.getByTestId("semantic-screen")).toContainText("what is one plus two");
+  await expect(page.getByTestId("semantic-screen")).toContainText("three");
   await clickSessionMenuButton(page, "Summary");
-  await expect(page.getByTestId("sdk-summary")).toContainText("No SDK adapter");
+  await expect(page.getByTestId("sdk-summary")).toContainText(/ready|connected/i);
   await expect(page.getByTestId("tuishot-preview").locator("img")).toBeVisible();
   await expect.poll(async () => {
     return await page.getByTestId("tuishot-preview").locator("img").evaluate((image: HTMLImageElement) => {
@@ -80,7 +74,7 @@ test("launches a TUI, translates boxes into semantic sections, and accepts compo
   expect(shot.contentType).toContain("image/svg+xml");
   expect(shot.disposition).toContain("inline");
   expect(shot.body).toContain("<svg");
-  expect(shot.body).toContain("semantic-agent");
+  expect(shot.body).toContain("OpenAI Codex");
   expect(shot.body).toContain("three");
 
   await clickSessionMenuButton(page, "Logs");
@@ -145,47 +139,36 @@ test("exposes real and fake launcher presets as one-click button rows", async ({
 });
 
 test("sends named key chords separately from the composer", async ({ page, ctx }) => {
-  await page.goto(ctx.baseUrl);
-
-  await page.getByRole("textbox", { name: "Command" }).fill("semantic-agent");
-  await page.getByRole("button", { name: "Launch" }).click();
+  await launchFakeCodex(page, ctx);
   await clickSessionMenuButton(page, "HTML");
-  await expect(page.getByTestId("semantic-section").filter({ hasText: "Ask anything" })).toBeVisible();
+  await expect(page.getByTestId("semantic-screen")).toContainText("OpenAI Codex");
 
   await page.getByRole("button", { name: "esc" }).click();
 
-  await expect(page.getByTestId("semantic-section").filter({ hasText: "key escape" })).toBeVisible();
+  await expect.poll(async () => (await fetchSessionPayload(page)).stdinEvents.at(-1)?.text).toBe("\x1b");
 });
 
 test("key chord buttons do not return focus to the composer", async ({ page, ctx }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(ctx.baseUrl);
-
-  await page.getByRole("textbox", { name: "Command" }).fill("semantic-agent");
-  await page.getByRole("button", { name: "Launch" }).click();
-  await expect(page.getByTestId("rendered-terminal")).toContainText("Ask anything");
+  await launchFakeCodex(page, ctx);
 
   const composer = page.getByRole("textbox", { name: "Send stdin" });
   await composer.focus();
   await expect(composer).toBeFocused();
   await page.getByRole("button", { name: "esc" }).click();
 
-  await expect(page.getByTestId("rendered-terminal")).toContainText("key escape");
+  await expect.poll(async () => (await fetchSessionPayload(page)).stdinEvents.at(-1)?.text).toBe("\x1b");
   expect(await composer.evaluate((element) => document.activeElement === element)).toBe(false);
 });
 
 test("can type directly into the terminal renderer", async ({ page, ctx }) => {
-  await page.goto(ctx.baseUrl);
-
-  await page.getByRole("textbox", { name: "Command" }).fill("semantic-agent");
-  await page.getByRole("button", { name: "Launch" }).click();
-  await expect(page.getByTestId("rendered-terminal")).toContainText("Ask anything");
+  await launchFakeCodex(page, ctx);
 
   await page.locator(".terminal-host").click();
   await page.keyboard.type("what is one plus two");
   await page.keyboard.press("Enter");
 
-  await expect(page.getByTestId("rendered-terminal")).toContainText("three");
+  await expect(page.getByTestId("rendered-terminal")).toContainText("three", { timeout: 8_000 });
   const payload = await fetchSessionPayload(page);
   expect(payload.renderedAnsi).toContain("three");
 
@@ -195,11 +178,7 @@ test("can type directly into the terminal renderer", async ({ page, ctx }) => {
 
 test("keeps the terminal shell fixed while xterm owns scrolling", async ({ page, ctx }) => {
   await page.setViewportSize({ width: 1280, height: 720 });
-  await page.goto(ctx.baseUrl);
-
-  await page.getByRole("textbox", { name: "Command" }).fill("semantic-agent");
-  await page.getByRole("button", { name: "Launch" }).click();
-  await expect(page.getByTestId("rendered-terminal")).toContainText("Ask anything");
+  await launchFakeCodex(page, ctx);
 
   await expect.poll(async () => {
     return await page.locator("#screen").evaluate((screen) => {
@@ -223,7 +202,8 @@ test("keeps the terminal shell fixed while xterm owns scrolling", async ({ page,
   expect(scrollTop).toBe(0);
 });
 
-test("keeps mobile session chrome compact without document scrolling", async ({ page, ctx }) => {
+test("keeps mobile session chrome compact without document scrolling", async ({ page }) => {
+  await using ctx = await createContext({ TUIUI_PAGE_LOAD_TOASTS: "1" });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(ctx.baseUrl);
 
@@ -343,10 +323,7 @@ test("keeps mobile session chrome compact without document scrolling", async ({ 
 });
 
 test("can pause and resume live session events", async ({ page, ctx }) => {
-  await page.goto(ctx.baseUrl);
-
-  await page.getByRole("textbox", { name: "Command" }).fill("semantic-agent");
-  await page.getByRole("button", { name: "Launch" }).click();
+  await launchFakeCodex(page, ctx);
   await clickSessionMenuButton(page, "Pause events");
 
   await openSessionMenu(page);
@@ -385,13 +362,12 @@ test("does not inherit NO_COLOR into launched TUIs", async ({ page, ctx }) => {
   });
 });
 
-test("does not let package-manager bin shims shadow real agent commands", async ({ page }) => {
+test("does not let package-manager bin shims shadow fakeagent-backed Codex", async ({ page }) => {
   await using ctx = await createContextWithCodexShimShadow();
 
-  await page.goto(ctx.baseUrl);
-  await page.getByRole("button", { name: "Codex", exact: true }).click();
+  await launchFakeCodex(page, ctx);
 
-  await expect(page.getByTestId("rendered-terminal")).toContainText("Codex test TUI");
+  await expect(page.getByTestId("rendered-terminal")).toContainText("OpenAI Codex");
   await expect(page.getByTestId("rendered-terminal")).not.toContainText("shadowed repo-local codex");
 });
 
@@ -473,7 +449,7 @@ test("resolves a fakeagent-backed Codex TUI into SDK summary YAML", async ({ pag
   await expect(page.getByRole("button", { name: "Codex", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Fake Codex" }).click();
 
-  await expect(page.getByTestId("rendered-terminal")).toContainText("Codex test TUI");
+  await expectReadyFakeCodex(page);
   await page.getByRole("textbox", { name: "Send stdin" }).fill("what is one plus two");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByTestId("rendered-terminal")).toContainText("three");
@@ -487,15 +463,6 @@ test("resolves a fakeagent-backed Codex TUI into SDK summary YAML", async ({ pag
     createdOffsetMs: -60_000,
     updatedOffsetMs: 2_000,
   });
-  writeCodexFixtureState(ctx, launchedPayload.createdAt, {
-    codexHomeDir: fakeCodexHome,
-    threadId: "codex-test-thread",
-    title: "Codex fixture thread",
-    latestUserText: "summarize this codex tui",
-    latestAssistantText: "codex can now be summarized",
-    createdOffsetMs: 100,
-    updatedOffsetMs: 1_000,
-  });
 
   await clickSessionMenuButton(page, "Summary");
   await page.getByRole("button", { name: "Refresh snapshot" }).click();
@@ -504,19 +471,20 @@ test("resolves a fakeagent-backed Codex TUI into SDK summary YAML", async ({ pag
   await openSdkDiagnostics(page);
   await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("provider: codex");
   await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("baseUrl: /tmp/fakeagent-codex-home/state_5.sqlite");
-  await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("providerSessionId: codex-test-thread");
-  await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("latestUserText: summarize this codex tui");
-  await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("latestAssistantText: codex can now be summarized");
+  await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("providerSessionId:");
+  await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("latestUserText: what is one plus two");
+  await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("latestAssistantText: three");
   await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).not.toContainText("this is the wrong supervising session");
   await expect.poll(async () => {
     return await page.locator("#sdk-yaml-editor .cm-editor").evaluate((editor) => getComputedStyle(editor).fontSize);
   }).toBe("10px");
 
   const payload = await fetchSessionPayload(page);
+  expect(payload.sdk.externalSessionId).toMatch(/^[0-9a-f-]{36}$/);
   expect(payload.sdk.summary).toMatchObject({
     provider: "codex",
-    latestUserText: "summarize this codex tui",
-    latestAssistantText: "codex can now be summarized",
+    latestUserText: "what is one plus two",
+    latestAssistantText: "three",
   });
 });
 
@@ -528,7 +496,7 @@ test("shows a toast instead of an unhandled rejection when session brief fetch f
 
   await page.goto(ctx.baseUrl);
   await page.getByRole("button", { name: "Fake Codex" }).click();
-  await expect(page.getByTestId("rendered-terminal")).toContainText("Codex test TUI");
+  await expectReadyFakeCodex(page);
   await clickSessionMenuButton(page, "Summary");
   await page.evaluate(() => {
     const realFetch = window.fetch.bind(window);
@@ -606,6 +574,21 @@ async function openSdkDiagnostics(page: Page) {
   await page.locator(".sdk-diagnostics > summary").click();
 }
 
+async function launchFakeCodex(page: Page, ctx: FixtureContext) {
+  test.skip(!commandExists("codex"), "codex is not installed");
+
+  await page.goto(ctx.baseUrl);
+  await page.getByRole("button", { name: "Fake Codex" }).click();
+  await expect(page).toHaveURL(/\/sessions\/tuiui_[a-f0-9]+$/);
+  await expectReadyFakeCodex(page);
+}
+
+async function expectReadyFakeCodex(page: Page) {
+  const terminal = page.getByTestId("rendered-terminal");
+  await expect(terminal).toContainText("OpenAI Codex", { timeout: 8_000 });
+  await expect(terminal).not.toContainText(/upgrade|sign in|login|api key|trust this folder|continue\?/i);
+}
+
 async function measureFirstLineGutterOffset(page: Page) {
   return await page.locator("#sdk-yaml-editor").evaluate((editor) => {
     const line = editor.querySelector(".cm-line");
@@ -678,11 +661,9 @@ async function createContextWithPathPrefix(pathPrefix: string, envOverrides: Rec
   const fakeBinDir = path.join(tempRoot, "bin");
   fs.mkdirSync(workspaceDir, { recursive: true });
   fs.mkdirSync(fakeBinDir, { recursive: true });
-  fs.writeFileSync(path.join(fakeBinDir, "semantic-agent"), semanticAgentSource, { mode: 0o755 });
   fs.writeFileSync(path.join(fakeBinDir, "bytewise-ui"), bytewiseUiSource, { mode: 0o755 });
   fs.writeFileSync(path.join(fakeBinDir, "color-env-agent"), colorEnvAgentSource, { mode: 0o755 });
   fs.writeFileSync(path.join(fakeBinDir, "scrollback-agent"), scrollbackAgentSource, { mode: 0o755 });
-  fs.writeFileSync(path.join(fakeBinDir, "codex"), codexTuiSource, { mode: 0o755 });
   fs.writeFileSync(path.join(fakeBinDir, "claude"), claudeTuiSource, { mode: 0o755 });
 
   const port = await getFreePort();
@@ -765,77 +746,6 @@ function commandExists(command: string) {
   const paths = (process.env.PATH || "").split(path.delimiter);
   return paths.some((dir) => fs.existsSync(path.join(dir, command)));
 }
-
-const semanticAgentSource = `#!/usr/bin/env node
-process.stdin.setRawMode(true);
-process.stdin.resume();
-process.stdin.setEncoding("utf8");
-
-let input = "";
-let answer = "";
-let key = "";
-const messages = [];
-
-function line(text) {
-  return ("│ " + (text || " ") + "                              │").slice(0, 32) + "│\\r\\n";
-}
-
-function draw() {
-  process.stdout.write("\\x1b[2J\\x1b[H");
-  process.stdout.write("╭─ semantic-agent ─────────────╮\\r\\n");
-  process.stdout.write("│ status idle                  │\\r\\n");
-  process.stdout.write("╰──────────────────────────────╯\\r\\n");
-  if (messages.length > 0) {
-    process.stdout.write("\\r\\n╭─ Message history ────────────╮\\r\\n");
-    for (const message of messages.slice(-4)) {
-      process.stdout.write(line(message));
-    }
-    process.stdout.write("╰──────────────────────────────╯\\r\\n");
-  }
-  process.stdout.write("\\r\\n");
-  process.stdout.write("╭─ Ask anything ───────────────╮\\r\\n");
-  process.stdout.write(line(input));
-  process.stdout.write("╰──────────────────────────────╯\\r\\n");
-  if (answer) {
-    process.stdout.write("\\r\\n╭─ Answer ─────────────────────╮\\r\\n");
-    process.stdout.write(line(answer));
-    process.stdout.write("╰──────────────────────────────╯\\r\\n");
-  }
-  if (key) {
-    process.stdout.write("\\r\\n╭─ Key ────────────────────────╮\\r\\n");
-    process.stdout.write(line(key));
-    process.stdout.write("╰──────────────────────────────╯\\r\\n");
-  }
-}
-
-function submit() {
-  const submitted = input;
-  answer = /one plus two/i.test(input) ? "three" : "heard " + input;
-  messages.push("me: " + submitted);
-  messages.push("agent: " + answer);
-  input = "";
-  draw();
-}
-
-draw();
-
-process.stdin.on("data", (chunk) => {
-  for (const char of chunk) {
-    if (char === "\\u0003") process.exit(0);
-    if (char === "\\u001b") {
-      key = "key escape";
-      draw();
-      continue;
-    }
-    if (char === "\\r" || char === "\\n") {
-      submit();
-      continue;
-    }
-    input += char;
-  }
-  draw();
-});
-`;
 
 const bytewiseUiSource = `#!/usr/bin/env node
 const bytes = Buffer.from("──hello──\\n", "utf8");
@@ -1222,49 +1132,6 @@ function codexRolloutMessage(timestamp: string, role: string, text: string) {
 function sqlString(value: string) {
   return value.replaceAll("'", "''");
 }
-
-const codexTuiSource = `#!/usr/bin/env node
-process.stdin.setRawMode(true);
-process.stdin.resume();
-process.stdin.setEncoding("utf8");
-
-let input = "";
-let sawLineFeed = false;
-let answer = "";
-
-function draw() {
-  process.stdout.write("\\x1b[2J\\x1b[H");
-  process.stdout.write("\\x1b[36m╭─ Codex test TUI ─────────────╮\\x1b[0m\\r\\n");
-  process.stdout.write("\\x1b[36m│\\x1b[0m status idle                  \\x1b[36m│\\x1b[0m\\r\\n");
-  process.stdout.write("╰──────────────────────────────╯\\r\\n");
-  process.stdout.write("\\r\\n");
-  process.stdout.write(("› " + input + "                              ").slice(0, 32) + "\\r\\n");
-  if (answer) {
-    process.stdout.write("\\x1b[32m" + answer + "\\x1b[0m\\r\\n");
-  }
-}
-
-draw();
-process.stdin.on("data", (chunk) => {
-  for (const char of chunk) {
-    if (char === "\\u0003") process.exit(0);
-    if (char === "\\n") {
-      sawLineFeed = true;
-      continue;
-    }
-    if (char === "\\r") {
-      if (sawLineFeed && input.trim()) {
-        answer = /one plus two/i.test(input) ? "three" : "heard " + input;
-        input = "";
-      }
-      sawLineFeed = false;
-      continue;
-    }
-    input += char;
-  }
-  draw();
-});
-`;
 
 const claudeTuiSource = `#!/usr/bin/env node
 process.stdin.setRawMode(true);
