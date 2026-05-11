@@ -449,37 +449,24 @@ test("does not let package-manager bin shims shadow fakeagent-backed Codex", asy
 });
 
 test("can drive OpenCode through fakeagent when OpenCode is installed", async ({ page, ctx }) => {
-  test.skip(!commandExists("opencode"), "opencode is not installed");
-
-  await page.goto(ctx.baseUrl);
-  await page.getByRole("button", { name: "Fake OpenCode" }).click();
-
-  await expect(page.getByTestId("rendered-terminal")).toContainText(/Ask anything|OpenCode/i);
-
-  await page.getByRole("textbox", { name: "Send stdin" }).fill("what is one plus two");
-  await page.getByRole("button", { name: "Send" }).click();
-
-  await expect(page.getByTestId("rendered-terminal")).toContainText("three", { timeout: 20_000 });
+  await launchFakeOpenCodeWithQuestion(page, ctx);
   await clickSessionMenuButton(page, "Summary");
   await page.getByRole("button", { name: "Refresh snapshot" }).click();
   await expect(page.getByTestId("sdk-summary")).toContainText("connected");
   await expect(page.getByTestId("session-brief")).toContainText("No session brief yet.");
   await expect(page.locator(".sdk-diagnostics")).not.toHaveAttribute("open", "");
-  await openSdkDiagnostics(page);
-  await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("latestUserText: what is one plus two");
-  await expect(page.locator("#sdk-yaml-editor .cm-line span[class]").first()).toBeVisible();
-  expect(await measureFirstLineGutterOffset(page)).toBeLessThanOrEqual(1);
   const refreshedPayload = await fetchSessionPayload(page);
   expect(refreshedPayload.sdk.summary.latestAssistantText).toContain("three");
   await page.getByRole("button", { name: "Get session brief" }).click();
-  await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("method: opencode.session.fork+prompt", { timeout: 20_000 });
-  await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("status: completed");
-  await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("forks:");
-  await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("forkSessionId:");
+  await expect.poll(async () => (await fetchSessionPayload(page)).sdk.sidecarSummary.status, { timeout: 20_000 }).toBe("completed");
   await expect(page.getByTestId("session-brief")).toContainText("current");
   await expect(page.getByTestId("session-brief")).toContainText("Executive summary");
   await expect(page.getByTestId("session-brief")).toContainText("Suggested next actions");
   const payload = await fetchSessionPayload(page);
+  expect(payload.sdk.sidecarSummary).toMatchObject({
+    method: "opencode.session.fork+prompt",
+    status: "completed",
+  });
   expect(payload.sdk.forks[0]).toMatchObject({
     provider: "opencode",
     purpose: "sidecarSummary",
@@ -491,10 +478,26 @@ test("can drive OpenCode through fakeagent when OpenCode is installed", async ({
   expect(payload.sdk.forks[0].forkSessionId).not.toBe(payload.sdk.externalSessionId);
   expect(payload.sdk.summary).toMatchObject({ messageCount: 2 });
   await page.getByRole("button", { name: "Get session brief" }).click();
-  await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("Reused the completed session brief for the current fork point.");
+  await expect.poll(async () => (await fetchSessionPayload(page)).sdk.sidecarSummary.note).toContain("Reused the completed session brief for the current fork point.");
   const reusedPayload = await fetchSessionPayload(page);
   expect(reusedPayload.sdk.forks).toHaveLength(1);
   expect(reusedPayload.sdk.forks[0].forkSessionId).toBe(payload.sdk.forks[0].forkSessionId);
+});
+
+test("keeps provider diagnostics YAML readable and stable", async ({ page, ctx }) => {
+  await launchFakeOpenCodeWithQuestion(page, ctx);
+  await clickSessionMenuButton(page, "Summary");
+  await page.getByRole("button", { name: "Refresh snapshot" }).click();
+  await openSdkDiagnostics(page);
+  await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("latestUserText: what is one plus two");
+  await expect(page.locator("#sdk-yaml-editor .cm-line span[class]").first()).toBeVisible();
+  expect(await measureFirstLineGutterOffset(page)).toBeLessThanOrEqual(1);
+
+  await page.getByRole("button", { name: "Get session brief" }).click();
+  await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("method: opencode.session.fork+prompt", { timeout: 20_000 });
+  await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("status: completed");
+  await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("forks:");
+  await expect(page.getByRole("textbox", { name: "Provider snapshot diagnostics YAML" })).toContainText("forkSessionId:");
   const yamlBeforeRefresh = await page.locator("#sdk-yaml-editor .cm-content").textContent();
   const scrollBeforeRefresh = await scrollYamlEditorToBottom(page);
   await markYamlEditorContent(page);
@@ -659,6 +662,19 @@ async function launchFakeCodex(page: Page, ctx: FixtureContext) {
   await page.getByRole("button", { name: "Fake Codex" }).click();
   await expect(page).toHaveURL(/\/sessions\/tuiui_[a-f0-9]+$/);
   await expectReadyFakeCodex(page);
+}
+
+async function launchFakeOpenCodeWithQuestion(page: Page, ctx: FixtureContext) {
+  test.skip(!commandExists("opencode"), "opencode is not installed");
+
+  await page.goto(ctx.baseUrl);
+  await page.getByRole("button", { name: "Fake OpenCode" }).click();
+  await expect(page.getByTestId("rendered-terminal")).toContainText(/Ask anything|OpenCode/i);
+
+  await page.getByRole("textbox", { name: "Send stdin" }).fill("what is one plus two");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await expect(page.getByTestId("rendered-terminal")).toContainText("three", { timeout: 20_000 });
 }
 
 async function expectReadyFakeCodex(page: Page) {
