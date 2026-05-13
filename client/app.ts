@@ -516,6 +516,10 @@ function stopHomeIdleNotificationPolling() {
 }
 
 async function pollHomeIdleNotificationSessions(displayHomeDirs: string[]) {
+  if (!idleNotifications.isEnabled()) {
+    stopHomeIdleNotificationPolling();
+    return;
+  }
   try {
     const [sessions, recentAgentSessions] = await Promise.all([
       api<SessionListItem[]>("/api/sessions"),
@@ -533,7 +537,7 @@ function scheduleSessionIdleRefresh(payload: SessionPayload) {
   }
   sessionIdleRefreshTimer = window.setTimeout(() => {
     sessionIdleRefreshTimer = null;
-    if (activeSession?.id !== payload.id) {
+    if (!idleNotifications.isEnabled() || activeSession?.id !== payload.id) {
       return;
     }
     void api<SessionPayload>(`/api/sessions/${payload.id}`)
