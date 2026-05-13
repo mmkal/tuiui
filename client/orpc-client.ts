@@ -59,6 +59,9 @@ export async function callOrpcJsonApi<T>(path: string, init: RequestInit = {}): 
   if (method === "POST" && action === "recover") {
     return handled(await orpc.sessions.recover({ sessionId }) as T);
   }
+  if (method === "POST" && action === "archive") {
+    return handled(await orpc.sessions.archive({ sessionId }) as T);
+  }
   if (method === "POST" && action === "send") {
     return handled(await orpc.sessions.send({ sessionId, ...jsonBody(init) }) as T);
   }

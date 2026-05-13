@@ -12,4 +12,5 @@ export type SessionsRow = {
 	cwd: string;
 	launch_command: string;
 	created_at_ms: number;
+	archived_at_ms: number | null;
 };
