@@ -16,6 +16,7 @@ import {
 import { parseCommandLine } from "../src/command-line.ts";
 import { stringify as stringifyYaml } from "yaml";
 import { attachmentUploadName, dedupeClipboardImageFiles, type AttachmentSource } from "./attachments.ts";
+import { callOrpcJsonApi } from "./orpc-client.ts";
 import { showToast } from "./toast.ts";
 import {
   createBrowserVoiceRecognizer,
@@ -2794,6 +2795,12 @@ function keyNameFromKeyboardEvent(event: KeyboardEvent) {
 }
 
 async function api<T>(path: string, init: RequestInit = {}) {
+  const orpcResult = await callOrpcJsonApi<T>(path, init);
+  if (orpcResult.handled) {
+    return orpcResult.value;
+  }
+
+  // SSE, stdout polling, uploads, and SVG responses stay on the legacy handlers for now.
   const response = await fetch(path, {
     ...init,
     headers: {

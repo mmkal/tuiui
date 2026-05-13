@@ -5,7 +5,7 @@ size: large
 
 # Move JSON API To ORPC
 
-Status: Ready for a first implementation pass above `nightly/2026-05-13`. The goal is to introduce an ORPC router and typed client for TUI UI's ordinary JSON API calls while preserving existing `/api/*` routes as compatibility shims. Streaming, file upload, and SVG endpoints stay on the current hand-written handlers for this slice.
+Status: Implementation complete for the first ORPC slice. The ORPC router is mounted at `/rpc`, the browser `api()` helper now routes straightforward JSON calls through a typed ORPC client, and legacy `/api/*` JSON routes still share the same backend handlers. Remaining migration work is intentionally deferred for SSE, stdout polling, attachments, and SVG responses.
 
 ## Goal
 
@@ -36,14 +36,14 @@ The old `/api/*` JSON paths should keep working in this PR. Prefer routing both 
 
 ## Checklist
 
-- [ ] Add ORPC dependencies and a small router/client structure that fits the current Bun server.
-- [ ] Extract reusable JSON endpoint handlers from `cli.ts` so ORPC procedures and legacy `/api/*` routes share behavior.
-- [ ] Mount the ORPC `RPCHandler` under `/rpc`.
-- [ ] Add a typed browser ORPC client.
-- [ ] Migrate straightforward JSON client calls away from manual `api<T>(path)` fetches.
-- [ ] Keep streaming, attachments, and SVG endpoints on legacy handlers with clear comments.
-- [ ] Add tests proving ORPC procedures work and legacy `/api/*` compatibility still works.
-- [ ] Run typecheck and focused browser coverage.
+- [x] Add ORPC dependencies and a small router/client structure that fits the current Bun server. _Added published `@orpc/server`, `@orpc/client`, and `zod`; `cli.ts` now defines the ORPC router and `client/orpc-client.ts` defines the browser client._
+- [x] Extract reusable JSON endpoint handlers from `cli.ts` so ORPC procedures and legacy `/api/*` routes share behavior. _Shared helpers now back config, cwd, commands, sessions, recovery, send/key/resize/kill, and SDK refresh/summarize._
+- [x] Mount the ORPC `RPCHandler` under `/rpc`. _`startServer` creates an `RPCHandler` and checks `/rpc` before falling back to legacy `/api/*` handling._
+- [x] Add a typed browser ORPC client. _`client/orpc-client.ts` exports a typed ORPC path adapter using `RouterClient<AppRouter>` and `RPCLink`._
+- [x] Migrate straightforward JSON client calls away from manual `api<T>(path)` fetches. _`client/app.ts` sends recognized JSON API paths through `callOrpcJsonApi` before falling back to fetch._
+- [x] Keep streaming, attachments, and SVG endpoints on legacy handlers with clear comments. _Unmapped API paths intentionally fall through to legacy fetch; the fallback comment names SSE, stdout, uploads, and SVG._
+- [x] Add tests proving ORPC procedures work and legacy `/api/*` compatibility still works. _`test/orpc-api.test.ts` starts the Bun server, calls `/rpc` through an ORPC client, and compares legacy `/api` behavior._
+- [x] Run typecheck and focused browser coverage. _Ran `bun run typecheck`, `bun test test/orpc-api.test.ts`, `bun test test/session-recovery.test.ts`, `bun build client/app.ts`, and focused Playwright coverage._
 
 ## Notes
 
@@ -58,3 +58,4 @@ The ORPC docs recommend `@orpc/server` plus `@orpc/client`, with `RPCHandler` mo
 ## Implementation Log
 
 - 2026-05-13: Task fleshed out after coordination correction: stack is `main -> nightly/2026-05-13 -> ORPC implementation -> other bedtime branches`.
+- 2026-05-13: Implemented ORPC JSON route layer and browser client adapter while preserving legacy endpoints for compatibility and non-JSON surfaces.
