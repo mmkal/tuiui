@@ -85,6 +85,59 @@ test("requests idle notification permission only after the explicit control is c
   expect(await page.evaluate(() => localStorage.getItem("tuiui-browser-idle-notifications-enabled"))).toBe("1");
 });
 
+test("does not poll home idle notification snapshots before opt in", async ({ page, ctx }) => {
+  let sessionListRequests = 0;
+  let recentAgentRequests = 0;
+  await page.route("**/api/sessions", async (route) => {
+    if (new URL(route.request().url()).pathname === "/api/sessions") {
+      sessionListRequests += 1;
+    }
+    await route.continue();
+  });
+  await page.route("**/api/agent-sessions/recent", async (route) => {
+    recentAgentRequests += 1;
+    await route.continue();
+  });
+
+  await page.goto(ctx.baseUrl);
+  await expect(page.getByTestId("idle-notification-toggle")).toHaveText("Idle alerts: off");
+  expect(sessionListRequests).toBe(1);
+  expect(recentAgentRequests).toBe(1);
+
+  await page.waitForTimeout(5_300);
+
+  expect(sessionListRequests).toBe(1);
+  expect(recentAgentRequests).toBe(1);
+});
+
+test("does not refresh busy session idle status before opt in", async ({ page, ctx }) => {
+  const sessionId = "tuiui_idle_polling";
+  let sessionRequests = 0;
+  await page.route(`**/api/sessions/${sessionId}`, async (route) => {
+    sessionRequests += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(fakeSessionPayload({ id: sessionId, status: "busy" })),
+    });
+  });
+  await page.route(`**/api/sessions/${sessionId}/events`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body: "",
+    });
+  });
+
+  await page.goto(`${ctx.baseUrl}/sessions/${sessionId}`);
+  await expect(page.getByTestId("session-status")).toHaveText("busy");
+  expect(sessionRequests).toBe(1);
+
+  await page.waitForTimeout(1_600);
+
+  expect(sessionRequests).toBe(1);
+});
+
 test("shows a compact recovery command for a missing session", async ({ page, ctx }) => {
   await page.route("**/api/sessions/tuiui_missing", async (route) => {
     await route.fulfill({

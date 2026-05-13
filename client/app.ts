@@ -283,6 +283,7 @@ let voiceReadbackTimer: number | null = null;
 let composerAttachments: ComposerAttachment[] = [];
 let sessionIdleRefreshTimer: number | null = null;
 let homeIdleNotificationPollTimer: number | null = null;
+let homeIdleNotificationDisplayDirs: string[] = [];
 
 const idleNotifications = new BrowserIdleNotifications({
   storage: window.localStorage,
@@ -394,16 +395,33 @@ function bindIdleNotificationControls() {
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-action='toggle-idle-notifications']")) {
     button.addEventListener("click", async () => {
       button.disabled = true;
-      const current = idleNotifications.getControlState();
-      const next = current.enabled && current.permission !== "default"
-        ? idleNotifications.disable()
-        : await idleNotifications.enableFromUserGesture();
-      updateIdleNotificationControls();
-      showIdleNotificationControlToast(next);
-      button.disabled = false;
+      try {
+        const current = idleNotifications.getControlState();
+        const next = current.enabled && current.permission !== "default"
+          ? disableIdleNotifications()
+          : await enableIdleNotificationsFromControl();
+        updateIdleNotificationControls();
+        showIdleNotificationControlToast(next);
+      } finally {
+        button.disabled = false;
+      }
     });
   }
   updateIdleNotificationControls();
+}
+
+async function enableIdleNotificationsFromControl() {
+  const next = await idleNotifications.enableFromUserGesture();
+  await primeIdleNotificationSnapshotForCurrentRoute();
+  startIdleNotificationPollingForCurrentRoute();
+  return next;
+}
+
+function disableIdleNotifications() {
+  const next = idleNotifications.disable();
+  stopHomeIdleNotificationPolling();
+  clearSessionIdleRefreshTimer();
+  return next;
 }
 
 function updateIdleNotificationControls() {

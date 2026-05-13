@@ -142,6 +142,16 @@ export class BrowserIdleNotifications {
     }
   }
 
+  prime(sessions: IdleNotificationSession[]) {
+    for (const session of sessions) {
+      this.primeOne(session);
+    }
+  }
+
+  primeOne(session: IdleNotificationSession) {
+    this.statuses.set(session.key, session.status);
+  }
+
   observeOne(session: IdleNotificationSession) {
     const previousStatus = this.statuses.get(session.key);
     this.statuses.set(session.key, session.status);
@@ -158,17 +168,20 @@ export class BrowserIdleNotifications {
     if (notifications && notifications.permission === "granted") {
       const nextCount = (this.transitionCounts.get(session.key) || 0) + 1;
       this.transitionCounts.set(session.key, nextCount);
-      const notification = notifications.create(title, {
-        body,
-        tag: `tuiui-idle:${session.key}:${nextCount}`,
-      });
-      notification.onclick = () => {
-        notification.close?.();
-        if (session.routePath) {
-          this.input.openRoute(session.routePath);
-        }
-      };
-      return;
+      try {
+        const notification = notifications.create(title, {
+          body,
+          tag: `tuiui-idle:${session.key}:${nextCount}`,
+        });
+        notification.onclick = () => {
+          notification.close?.();
+          if (session.routePath) {
+            this.input.openRoute(session.routePath);
+          }
+        };
+        return;
+      } catch {
+      }
     }
 
     this.input.showToast({
