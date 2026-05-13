@@ -1,11 +1,11 @@
 ---
-status: needs-grilling
+status: ready-for-implementation
 size: large
 ---
 
 # Meta-Agent Coordinator
 
-Status: Task captured as a large product slice. The desired outcome is clear at a high level: a lightweight coordinator agent that watches other sessions, summarizes what they are doing, helps route the user's voice prompts, and coordinates between agents. The main missing pieces are the exact authority boundaries, the session-state representation, and how much autonomous action the coordinator may take.
+Status: Ready for a first coordinator slice. The bedtime implementation should create a deterministic "meta-agent" surface: a consolidated state-of-the-agents summary, a compact supervisor panel, and a confirmation-gated prompt forwarding flow. It should not make the coordinator autonomous or introduce a new LLM/provider yet.
 
 ## Goal
 
@@ -19,15 +19,23 @@ This probably needs a structured session summary representation that is useful t
 
 The first useful version can be conservative: observe sessions, maintain summaries, and ask before sending prompts. Later versions can coordinate more actively, such as nudging one agent with context from another, asking a reviewer agent to inspect a PR, or suggesting follow-up work.
 
+## Bedtime Scope
+
+Build the meta-agent as product/system behavior before making it a real AI agent. The first slice should expose a provider-neutral session summary from the backend, render it as a supervisor/coordinator view in the client, and let the user choose a target session for a forwarded prompt. Sending into another session must require an explicit confirmation click.
+
+The summary should use data TUI UI already has: live sessions, persisted session recovery metadata when available, recent provider sessions, cwd, title, provider, status, lifecycle, last activity, branch/worktree hints if cheaply discoverable, and available session brief/status text. If a field cannot be known cheaply, return an empty value with freshness/confidence metadata rather than blocking the endpoint.
+
+Voice can be represented by the same routing model as typed coordinator input in this first pass. The existing voice code can be wired later to fill the coordinator prompt box; the important piece tonight is the target resolution and confirmation boundary.
+
 ## Checklist
 
-- [ ] Define the session-state summary schema for active and recent agents.
-- [ ] Identify the current sources of truth for sessions, titles, providers, status, cwd, branches, task files, and PRs.
-- [ ] Add a backend or client-visible endpoint that returns a consolidated state-of-the-agents summary.
-- [ ] Create a coordinator session type or role that can read the summary and produce concise status updates for the user.
-- [ ] Add a voice-routing flow where the user can roughly address an agent and the coordinator resolves the target session.
-- [ ] Require explicit user confirmation before the coordinator sends a prompt into another agent session in the first version.
-- [ ] Add an audit trail showing what the coordinator observed, summarized, and forwarded.
+- [ ] Define the provider-neutral state-of-the-agents summary schema for active and recent agents.
+- [ ] Identify the current sources of truth for sessions, titles, providers, status, cwd, branches, task files, PRs, recovery commands, and session briefs.
+- [ ] Add a backend endpoint that returns a consolidated state-of-the-agents summary.
+- [ ] Render a supervisor/coordinator client surface that can answer "what is going on?" from that summary without a new LLM call.
+- [ ] Add a typed prompt-routing flow where the user chooses or resolves a target session.
+- [ ] Require explicit user confirmation before the coordinator sends a prompt into another agent session.
+- [ ] Add an audit trail in the UI showing what the coordinator observed and forwarded during the page session.
 - [ ] Add tests around summary freshness, target-session resolution, and prompt-forwarding confirmation.
 - [ ] Document the coordinator's authority boundaries so future agents do not make it too autonomous by accident.
 
@@ -44,3 +52,4 @@ The first useful version can be conservative: observe sessions, maintain summari
 ## Implementation Log
 
 - 2026-05-13: Captured task from the request for a dumb coordinating meta-agent that can track separate sessions and relay rough voice prompts.
+- 2026-05-13: Bedtime scope narrowed to deterministic coordination: expose a state summary, render a supervisor surface, and forward prompts only after explicit confirmation.
