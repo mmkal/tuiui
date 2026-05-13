@@ -43,6 +43,96 @@ test("shows a page-load toast on each full document load when opted in", async (
   await expect(page.getByTestId("page-load-toast")).toContainText("Page loaded #2");
 });
 
+test("requests idle notification permission only after the explicit control is clicked", async ({ page, ctx }) => {
+  await page.addInitScript(() => {
+    const notificationState = { requests: 0 };
+    class TestNotification {
+      static permission: NotificationPermission = "default";
+      onclick: ((event: Event) => void) | null = null;
+
+      constructor(_title: string, _options: NotificationOptions) {
+      }
+
+      static async requestPermission() {
+        notificationState.requests += 1;
+        TestNotification.permission = "granted";
+        return TestNotification.permission;
+      }
+
+      close() {
+      }
+    }
+
+    Object.defineProperty(window, "__tuiuiNotificationTest", {
+      configurable: true,
+      value: notificationState,
+    });
+    Object.defineProperty(window, "Notification", {
+      configurable: true,
+      value: TestNotification,
+    });
+  });
+
+  await page.goto(ctx.baseUrl);
+
+  await expect(page.getByTestId("idle-notification-toggle")).toHaveText("Idle alerts: off");
+  expect(await page.evaluate(() => (window as any).__tuiuiNotificationTest.requests)).toBe(0);
+
+  await page.getByTestId("idle-notification-toggle").click();
+
+  await expect(page.getByTestId("idle-notification-toggle")).toHaveText("Idle alerts: browser");
+  expect(await page.evaluate(() => (window as any).__tuiuiNotificationTest.requests)).toBe(1);
+  expect(await page.evaluate(() => localStorage.getItem("tuiui-browser-idle-notifications-enabled"))).toBe("1");
+});
+
+test("does not poll home idle notification snapshots before opt in", async ({ page, ctx }) => {
+  let jsonApiRequests = 0;
+  await page.route("**/*", async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname.startsWith("/api/") || pathname.startsWith("/rpc")) {
+      jsonApiRequests += 1;
+    }
+    await route.continue();
+  });
+
+  await page.goto(ctx.baseUrl);
+  await expect(page.getByTestId("idle-notification-toggle")).toHaveText("Idle alerts: off");
+  const requestsAfterInitialLoad = jsonApiRequests;
+  expect(requestsAfterInitialLoad).toBeGreaterThan(0);
+
+  await page.waitForTimeout(5_300);
+
+  expect(jsonApiRequests).toBe(requestsAfterInitialLoad);
+});
+
+test("does not refresh busy session idle status before opt in", async ({ page, ctx }) => {
+  const sessionId = "tuiui_idle_polling";
+  let sessionRequests = 0;
+  await page.route(`**/api/sessions/${sessionId}`, async (route) => {
+    sessionRequests += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(fakeSessionPayload({ id: sessionId, status: "busy" })),
+    });
+  });
+  await page.route(`**/api/sessions/${sessionId}/events`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body: "",
+    });
+  });
+
+  await page.goto(`${ctx.baseUrl}/sessions/${sessionId}`);
+  await expect(page.getByTestId("session-status")).toHaveText("busy");
+  expect(sessionRequests).toBe(1);
+
+  await page.waitForTimeout(1_600);
+
+  expect(sessionRequests).toBe(1);
+});
+
 test("shows a compact recovery command for a missing session", async ({ page, ctx }) => {
   await useLegacyApi(page);
   await page.route("**/api/sessions/tuiui_missing", async (route) => {
@@ -1231,6 +1321,71 @@ async function fetchSessionPayload(page: Page) {
   });
 }
 
+function fakeSessionPayload(input: { id: string; status: "busy" | "idle" }) {
+  const now = new Date().toISOString();
+  return {
+    id: input.id,
+    title: "Busy Codex session",
+    command: "codex",
+    args: [],
+    cwd: process.cwd(),
+    createdAt: now,
+    updatedAt: now,
+    lastOutputAt: now,
+    lifecycle: "running",
+    status: input.status,
+    exitCode: null,
+    cols: 80,
+    rows: 24,
+    renderedText: "working",
+    renderedHtml: "<div><span>working</span></div>",
+    renderedAnsi: "working",
+    screenVersion: 1,
+    snapshotEventId: 1,
+    redrawActive: false,
+    blocks: {
+      coordinateSystem: { origin: "top-left", x1: "exclusive", y1: "exclusive" },
+      cols: 80,
+      rows: 24,
+      cursor: { x: 0, y: 0, visible: false },
+      rawText: "working",
+      blocks: [],
+    },
+    semantic: {
+      title: "Busy Codex session",
+      status: input.status,
+      prompt: "finish the task",
+      rawText: "working",
+      sections: [],
+    },
+    sdk: {
+      provider: "codex",
+      state: "ready",
+      baseUrl: "",
+      externalSessionId: "",
+      status: "",
+      updatedAt: now,
+      error: "",
+      sidecarSummary: {
+        implemented: false,
+        status: "idle",
+        method: "",
+        sourceSessionId: "",
+        forkSessionId: "",
+        forkPoint: "",
+        updatedAt: "",
+        result: null,
+        error: "",
+        note: "",
+      },
+      forks: [],
+      summary: null,
+    },
+    stdinEvents: [],
+    stdoutEvents: [],
+  };
+}
+
 async function fetchSessionPayloadById(page: Page, sessionId: string) {
   return await page.evaluate(async (id) => {
     return await fetch(`/api/sessions/${id}`).then((response) => response.json());
@@ -1260,9 +1415,9 @@ async function createSessionFromHome(
         env: {},
         fakeAgent: "",
       }),
-    });
-    return await response.json();
-  }, input) as { id: string; url: string };
+     });
+     return await response.json();
+   }, input) as { id: string; url: string };
 }
 
 async function fetchTuishot(page: Page) {
