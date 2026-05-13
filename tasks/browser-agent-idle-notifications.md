@@ -1,11 +1,11 @@
 ---
-status: ready
+status: ready-for-implementation
 size: medium
 ---
 
 # Browser Agent Idle Notifications
 
-Status: Task captured and ready for a first implementation pass. The main completed piece is the product shape: notify the browser user when any agent transitions from busy to idle. The main missing pieces are permission UX details, duplicate-notification suppression, and final wording for notification titles/bodies.
+Status: Ready for a bedtime implementation pass. The first slice should ship opt-in native browser notifications for live TUI UI sessions when they transition from busy to idle, with duplicate suppression and an in-app toast fallback. Out of scope for this pass: service workers, notifications after the browser tab is closed, and a global watchlist for agents outside this TUI UI server.
 
 ## Goal
 
@@ -19,16 +19,23 @@ Use the browser Notification API for the first slice. Keep the implementation lo
 
 The feature should work for Codex first, but the state model should be provider-neutral because TUI UI already tracks Codex, Claude, and OpenCode sessions with the same `busy`/`idle`/`exited` surface.
 
+## Bedtime Scope
+
+Implement this as a browser-client feature over the current session payloads. The current tab can observe sessions it has loaded or that the home overview polls; it does not need a server push channel or service worker. Store the user's opt-in locally in the browser, and never trigger the Notification permission prompt during initial page load.
+
+When the Notification API is unavailable or denied, show one normal in-app toast for the same busy-to-idle transition. Clicking a native notification should focus or open the relevant `/sessions/:id` route when the browser allows it.
+
 ## Checklist
 
-- [ ] Identify the current client-side polling/status update path that observes agent session status.
-- [ ] Add transition tracking so notifications fire only on `busy` to `idle`.
-- [ ] Add an explicit browser-notification permission request flow instead of asking on first page load.
-- [ ] Include enough context in the notification to identify the provider, title, and working directory or task.
+- [ ] Identify and reuse the current client-side polling/status update paths for session detail and home/recent-session views.
+- [ ] Add transition tracking so notifications fire only on `busy` to `idle`, never for initially idle sessions.
+- [ ] Add an explicit browser-notification permission request flow from a visible control.
+- [ ] Include enough context in the notification to identify the provider/title and working directory or task.
 - [ ] Suppress duplicate notifications across rapid polling refreshes and page reload initialization.
 - [ ] Fall back to an in-app toast when browser notifications are denied or unavailable.
-- [ ] Add focused tests for transition detection, duplicate suppression, and no notification on initially idle sessions.
-- [ ] Manually verify the browser notification behavior in Chrome with the TUI UI tab backgrounded.
+- [ ] Wire notification clicks to the relevant session route when possible.
+- [ ] Add focused tests for transition detection, duplicate suppression, fallback behavior, and no notification on initially idle sessions.
+- [ ] Manually verify the browser notification behavior in Chrome with the TUI UI tab backgrounded if the local environment permits it.
 
 ## Open Questions
 
@@ -40,3 +47,4 @@ The feature should work for Codex first, but the state model should be provider-
 ## Implementation Log
 
 - 2026-05-13: Captured task after confirming there was no active task, branch, PR, or code path for native browser notifications on idle transitions.
+- 2026-05-13: Bedtime scope narrowed to an opt-in browser-client implementation over existing session payloads; service-worker/background delivery is intentionally deferred.
