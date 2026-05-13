@@ -533,6 +533,11 @@ test("renders a factory floor station grid from the coordinator summary", async 
   await expect.poll(async () => {
     return await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1);
   }).toBe(true);
+  await expect.poll(async () => {
+    return await page.locator(".factory-layout").evaluate((layout: HTMLElement) => {
+      return layout.scrollWidth <= layout.clientWidth + 1;
+    });
+  }).toBe(true);
 });
 
 test("sends named key chords separately from the composer", async ({ page, ctx }) => {
@@ -1300,6 +1305,7 @@ function createTempDirectoryAsDatabasePath(prefix: string) {
 
 function factoryCoordinatorSummary(workspaceDir: string) {
   const generatedAt = "2026-05-13T12:00:00.000Z";
+  const longFactoryToken = `artifact-${"x".repeat(180)}`;
   return {
     format: "tuiui.coordinatorSummary.v1",
     generatedAt,
@@ -1322,8 +1328,8 @@ function factoryCoordinatorSummary(workspaceDir: string) {
         title: "busy build agent",
         status: "busy",
         lifecycle: "running",
-        currentTask: "Implementing the factory station renderer.",
-        cwd: workspaceDir,
+        currentTask: `Implementing the factory station renderer. ${longFactoryToken}`,
+        cwd: path.join(workspaceDir, longFactoryToken),
       }),
       factoryCoordinatorAgent({
         id: "live-idle",
