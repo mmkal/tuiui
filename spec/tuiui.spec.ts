@@ -44,6 +44,7 @@ test("shows a page-load toast on each full document load when opted in", async (
 });
 
 test("shows a compact recovery command for a missing session", async ({ page, ctx }) => {
+  await useLegacyApi(page);
   await page.route("**/api/sessions/tuiui_missing", async (route) => {
     await route.fulfill({
       status: 404,
@@ -253,6 +254,7 @@ test("explains that attachment uploads need a restarted server when the route is
 });
 
 test("exposes real and fake launcher presets as one-click button rows", async ({ page, ctx }) => {
+  await useLegacyApi(page);
   writeRecentOpenCodeFixtureState(ctx, {
     sessionId: "mobile-opencode-session",
     title: "OpenCode handoff session",
@@ -383,6 +385,7 @@ test("sends named key chords separately from the composer", async ({ page, ctx }
 });
 
 test("push-to-talk sends a transcript and reads back the idle result without a real microphone", async ({ page, ctx }) => {
+  await useLegacyApi(page);
   const sdkRefreshRequests: string[] = [];
   let staleSnapshotInjected = false;
   page.on("request", (request) => {
@@ -1071,6 +1074,12 @@ async function fetchTuishot(page: Page) {
 async function fetchRecentAgentSessions(page: Page) {
   return await page.evaluate(async () => {
     return await fetch("/api/agent-sessions/recent").then((response) => response.json());
+  });
+}
+
+async function useLegacyApi(page: Page) {
+  await page.addInitScript(() => {
+    (globalThis as any).__tuiuiForceLegacyApi = true;
   });
 }
 
