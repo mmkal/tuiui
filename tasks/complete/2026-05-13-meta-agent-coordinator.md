@@ -5,7 +5,7 @@ size: large
 
 # Meta-Agent Coordinator
 
-Status: Implemented for the first deterministic coordinator slice. The branch now has a provider-neutral summary model/API, a compact home-page supervisor panel, and confirmation-gated prompt forwarding into selected live sessions. Missing pieces are intentionally future-scoped: no autonomous provider/LLM behavior and no factory-floor visualization.
+Status: Implemented for the first deterministic coordinator slice. The branch now has a provider-neutral summary model/API, a compact home-page supervisor panel, and confirmation-gated prompt forwarding into exact selected live TUI session ids. Missing pieces are intentionally future-scoped: no autonomous provider/LLM behavior and no factory-floor visualization.
 
 ## Goal
 
@@ -55,3 +55,4 @@ Voice can be represented by the same routing model as typed coordinator input in
 - 2026-05-13: Bedtime scope narrowed to deterministic coordination: expose a state summary, render a supervisor surface, and forward prompts only after explicit confirmation.
 - 2026-05-13: Implemented `GET /api/coordinator/summary` and `POST /api/coordinator/forward`, plus the home-page supervisor UI and page-session audit trail.
 - 2026-05-13: Verified with `bun test test/meta-agent-coordinator.test.ts`, `bun run spec --grep "coordinator summary"`, and `bun run typecheck`.
+- 2026-05-13: Review fix: tightened `POST /api/coordinator/forward` to exact `targetSessionId` only, cached recent-provider and workspace metadata reads, and verified fuzzy forwarding rejection.

@@ -64,7 +64,6 @@ import { composerSubmitChunks, usesLfCrSubmit } from "./src/terminal-input.ts";
 import { formatCommandLine, parseCommandLine } from "./src/command-line.ts";
 import {
   createCoordinatorSummary,
-  resolveCoordinatorTarget,
   type CoordinatorWorkspaceMetadata,
   type LiveCoordinatorSessionInput,
   type RecentCoordinatorSessionInput,
@@ -199,6 +198,19 @@ type ServerState = {
   nextStdoutEventId: number;
   nextStdinEventId: number;
   sessionStore: SessionStore;
+  recentAgentSessionsCache: RecentAgentSessionsCache;
+  workspaceMetadataCache: Map<string, CachedWorkspaceMetadata>;
+};
+
+type RecentAgentSessionsCache = {
+  value: RecentAgentSession[] | null;
+  expiresAtMs: number;
+  promise: Promise<RecentAgentSession[]> | null;
+};
+
+type CachedWorkspaceMetadata = {
+  value: CoordinatorWorkspaceMetadata;
+  expiresAtMs: number;
 };
 
 const loopbackHost = "127.0.0.1";
@@ -209,6 +221,8 @@ const defaultRows = 42;
 const idleThresholdMs = 1_000;
 const redrawQuietMs = 600;
 const redrawMaxMs = 10_000;
+const recentAgentSessionsCacheTtlMs = 2_000;
+const workspaceMetadataCacheTtlMs = 10_000;
 const attachmentRoot = fs.mkdtempSync(path.join(os.tmpdir(), "tuiui-attachments-"));
 const terminalScrollbackSnapshotRows = 500;
 
@@ -245,6 +259,12 @@ const state: ServerState = {
   nextStdoutEventId: 1,
   nextStdinEventId: 1,
   sessionStore: createSessionStoreForEnv(process.env),
+  recentAgentSessionsCache: {
+    value: null,
+    expiresAtMs: 0,
+    promise: null,
+  },
+  workspaceMetadataCache: new Map(),
 };
 const server: ReturnType<typeof Bun.serve> = startServer({ host: cli.host, port: cli.port, state });
 const serverPort = Number(server.port || cli.port);
@@ -361,7 +381,7 @@ async function handleApiRequest(state: ServerState, request: Request, url: URL):
   }
 
   if (request.method === "GET" && url.pathname === "/api/agent-sessions/recent") {
-    return Response.json(await readRecentAgentSessions());
+    return Response.json(await readCachedRecentAgentSessions(state));
   }
 
   if (request.method === "GET" && url.pathname === "/api/coordinator/summary") {
@@ -1455,7 +1475,7 @@ async function readRecentAgentSessions(): Promise<RecentAgentSession[]> {
 }
 
 async function buildCoordinatorSummary(state: ServerState) {
-  const recentSessions = await readRecentAgentSessions();
+  const recentSessions = await readCachedRecentAgentSessions(state);
   const generatedAtMs = Date.now();
   return createCoordinatorSummary({
     generatedAtMs,
@@ -1487,7 +1507,7 @@ function toLiveCoordinatorSessionInput(state: ServerState, session: RuntimeSessi
     renderedText: payload.renderedText,
     recoveryCommand: recovery?.recoveryCommand || "",
     recoveryCreatedAt: recovery?.recoveryCreatedAtMs ? new Date(recovery.recoveryCreatedAtMs).toISOString() : "",
-    workspace: readCoordinatorWorkspaceMetadata(payload.cwd),
+    workspace: readCoordinatorWorkspaceMetadata(state, payload.cwd),
   };
 }
 
@@ -1496,13 +1516,12 @@ function toRecentCoordinatorSessionInput(session: RecentAgentSession): RecentCoo
     ...session,
     recoveryCommand: formatCommandLine(session.command, session.args),
     recoveryCreatedAt: "",
-    workspace: readCoordinatorWorkspaceMetadata(session.cwd),
+    workspace: readCoordinatorWorkspaceMetadata(state, session.cwd),
   };
 }
 
 async function forwardCoordinatorPrompt(state: ServerState, request: Request) {
   const body = await request.json() as {
-    target?: string;
     targetSessionId?: string;
     text?: string;
     submit?: boolean;
@@ -1513,29 +1532,26 @@ async function forwardCoordinatorPrompt(state: ServerState, request: Request) {
     return Response.json({ error: "Prompt text is required." }, { status: 400 });
   }
 
-  const summary = await buildCoordinatorSummary(state);
-  const resolution = resolveCoordinatorTarget(summary.agents, String(body.targetSessionId || body.target || ""));
-  if (resolution.status !== "resolved" || !resolution.agent) {
-    return Response.json({
-      error: resolution.reason,
-      resolution,
-      summary,
-    }, { status: resolution.status === "ambiguous" ? 409 : 400 });
-  }
-
   if (body.confirmed !== true) {
     return Response.json({
       error: "Coordinator forwarding requires explicit confirmation.",
-      resolution,
       requiresConfirmation: true,
     }, { status: 409 });
   }
 
-  const session = state.sessions.get(resolution.agent.id);
-  if (!session || session.lifecycle !== "running") {
+  const targetSessionId = String(body.targetSessionId || "");
+  if (!targetSessionId) {
+    return Response.json({ error: "targetSessionId is required." }, { status: 400 });
+  }
+
+  const session = state.sessions.get(targetSessionId);
+  if (!session) {
+    return Response.json({ error: "Target session not found." }, { status: 404 });
+  }
+
+  if (session.lifecycle !== "running") {
     return Response.json({
       error: "Target session is no longer live.",
-      resolution,
     }, { status: 409 });
   }
 
@@ -1545,31 +1561,62 @@ async function forwardCoordinatorPrompt(state: ServerState, request: Request) {
     ok: true,
     forwardedAt,
     target: {
-      id: resolution.agent.id,
-      title: resolution.agent.title,
-      provider: resolution.agent.provider,
-      cwd: resolution.agent.cwd,
+      id: session.id,
+      title: sessionDisplayTitle(session),
+      provider: session.sdk.provider,
+      cwd: session.cwd,
     },
     audit: {
       type: "coordinator.prompt.forwarded",
       forwardedAt,
-      targetSessionId: resolution.agent.id,
+      targetSessionId: session.id,
       promptPreview: text.slice(0, 240),
       confirmed: true,
     },
   });
 }
 
-function readCoordinatorWorkspaceMetadata(cwd: string): CoordinatorWorkspaceMetadata {
+async function readCachedRecentAgentSessions(state: ServerState) {
+  const nowMs = Date.now();
+  const cache = state.recentAgentSessionsCache;
+  if (cache.value && cache.expiresAtMs > nowMs) {
+    return cache.value;
+  }
+  if (cache.promise) {
+    return await cache.promise;
+  }
+  cache.promise = readRecentAgentSessions()
+    .then((sessions) => {
+      cache.value = sessions;
+      cache.expiresAtMs = Date.now() + recentAgentSessionsCacheTtlMs;
+      return sessions;
+    })
+    .finally(() => {
+      cache.promise = null;
+    });
+  return await cache.promise;
+}
+
+function readCoordinatorWorkspaceMetadata(state: ServerState, cwd: string): CoordinatorWorkspaceMetadata {
+  const cacheKey = path.resolve(cwd || ".");
+  const cached = state.workspaceMetadataCache.get(cacheKey);
+  if (cached && cached.expiresAtMs > Date.now()) {
+    return cached.value;
+  }
   const gitRoot = gitOutput(cwd, ["rev-parse", "--show-toplevel"]);
   const branch = gitOutput(cwd, ["branch", "--show-current"]);
   const gitHead = gitOutput(cwd, ["rev-parse", "--short", "HEAD"]);
-  return {
+  const value = {
     gitRoot,
     branch: branch || (gitHead ? `detached:${gitHead}` : ""),
     gitHead,
     worktree: gitRoot,
   };
+  state.workspaceMetadataCache.set(cacheKey, {
+    value,
+    expiresAtMs: Date.now() + workspaceMetadataCacheTtlMs,
+  });
+  return value;
 }
 
 function gitOutput(cwd: string, args: string[]) {

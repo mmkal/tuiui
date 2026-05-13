@@ -806,7 +806,7 @@ function bindCoordinatorControls(summary: CoordinatorSummary, homeDirs: string[]
       const result = await api<{ forwardedAt: string; target: { id: string; title: string } }>("/api/coordinator/forward", {
         method: "POST",
         body: JSON.stringify({
-          target: pending.target,
+          targetSessionId: pending.target,
           text: pending.text,
           submit: true,
           confirmed: true,
@@ -820,7 +820,7 @@ function bindCoordinatorControls(summary: CoordinatorSummary, homeDirs: string[]
         prompt: pending.text,
         createdAt: result.forwardedAt,
       });
-      const nextSummary = await api<CoordinatorSummary>("/api/coordinator/summary");
+      const nextSummary = await api<CoordinatorSummary>("/api/coordinator/summary").catch(() => summary);
       renderCoordinatorPanelInto(nextSummary, homeDirs);
     } catch (error) {
       addCoordinatorAuditEvent({

@@ -182,7 +182,7 @@ export function createCoordinatorSummary(input: {
       requiresConfirmation: true,
       notes: [
         "The coordinator summarizes data TUI UI already has; it does not call an LLM or provider autonomously.",
-        "Prompt forwarding is limited to selected live running sessions and requires an explicit confirmation.",
+        "Prompt forwarding is limited to exact live TUI session ids and requires an explicit confirmation.",
       ],
     },
     observations: createObservations(agents, counts, generatedAt),
