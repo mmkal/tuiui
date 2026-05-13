@@ -1151,6 +1151,71 @@ async function fetchSessionPayload(page: Page) {
   });
 }
 
+function fakeSessionPayload(input: { id: string; status: "busy" | "idle" }) {
+  const now = new Date().toISOString();
+  return {
+    id: input.id,
+    title: "Busy Codex session",
+    command: "codex",
+    args: [],
+    cwd: process.cwd(),
+    createdAt: now,
+    updatedAt: now,
+    lastOutputAt: now,
+    lifecycle: "running",
+    status: input.status,
+    exitCode: null,
+    cols: 80,
+    rows: 24,
+    renderedText: "working",
+    renderedHtml: "<div><span>working</span></div>",
+    renderedAnsi: "working",
+    screenVersion: 1,
+    snapshotEventId: 1,
+    redrawActive: false,
+    blocks: {
+      coordinateSystem: { origin: "top-left", x1: "exclusive", y1: "exclusive" },
+      cols: 80,
+      rows: 24,
+      cursor: { x: 0, y: 0, visible: false },
+      rawText: "working",
+      blocks: [],
+    },
+    semantic: {
+      title: "Busy Codex session",
+      status: input.status,
+      prompt: "finish the task",
+      rawText: "working",
+      sections: [],
+    },
+    sdk: {
+      provider: "codex",
+      state: "ready",
+      baseUrl: "",
+      externalSessionId: "",
+      status: "",
+      updatedAt: now,
+      error: "",
+      sidecarSummary: {
+        implemented: false,
+        status: "idle",
+        method: "",
+        sourceSessionId: "",
+        forkSessionId: "",
+        forkPoint: "",
+        updatedAt: "",
+        result: null,
+        error: "",
+        note: "",
+      },
+      forks: [],
+      summary: null,
+    },
+    stdinEvents: [],
+    stdoutEvents: [],
+  };
+}
+
 async function fetchTuishot(page: Page) {
   return await page.evaluate(async () => {
     const id = location.pathname.split("/").at(-1);

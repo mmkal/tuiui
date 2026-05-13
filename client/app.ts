@@ -455,6 +455,9 @@ function observeHomeIdleNotificationSessions(
 
 function startHomeIdleNotificationPolling(displayHomeDirs: string[]) {
   stopHomeIdleNotificationPolling();
+  if (!idleNotifications.isEnabled()) {
+    return;
+  }
   homeIdleNotificationPollTimer = window.setInterval(() => {
     void pollHomeIdleNotificationSessions(displayHomeDirs);
   }, 5_000);
@@ -485,7 +488,7 @@ async function pollHomeIdleNotificationSessions(displayHomeDirs: string[]) {
 
 function scheduleSessionIdleRefresh(payload: SessionPayload) {
   clearSessionIdleRefreshTimer();
-  if (payload.lifecycle !== "running" || payload.status !== "busy") {
+  if (!idleNotifications.isEnabled() || payload.lifecycle !== "running" || payload.status !== "busy") {
     return;
   }
   sessionIdleRefreshTimer = window.setTimeout(() => {
@@ -504,6 +507,40 @@ function scheduleSessionIdleRefresh(payload: SessionPayload) {
       })
       .catch(() => undefined);
   }, 1_250);
+}
+
+async function primeIdleNotificationSnapshotForCurrentRoute() {
+  if (activeSession) {
+    idleNotifications.primeOne(sessionPayloadIdleNotification(activeSession));
+    return;
+  }
+  if (location.pathname !== "/" && location.pathname !== "/sessions") {
+    return;
+  }
+  try {
+    const [sessions, recentAgentSessions] = await Promise.all([
+      api<SessionListItem[]>("/api/sessions"),
+      api<RecentAgentSession[]>("/api/agent-sessions/recent"),
+    ]);
+    idleNotifications.prime([
+      ...sessions.map((session) => sessionListItemIdleNotification(session, homeIdleNotificationDisplayDirs)),
+      ...recentAgentSessions.map((session) => recentAgentSessionIdleNotification(session, homeIdleNotificationDisplayDirs)),
+    ]);
+  } catch {
+  }
+}
+
+function startIdleNotificationPollingForCurrentRoute() {
+  if (!idleNotifications.isEnabled()) {
+    return;
+  }
+  if (activeSession) {
+    scheduleSessionIdleRefresh(activeSession);
+    return;
+  }
+  if (location.pathname === "/" || location.pathname === "/sessions") {
+    startHomeIdleNotificationPolling(homeIdleNotificationDisplayDirs);
+  }
 }
 
 function clearSessionIdleRefreshTimer() {
@@ -684,6 +721,7 @@ async function renderHome() {
     api<RecentAgentSession[]>("/api/agent-sessions/recent"),
   ]);
   const displayHomeDirs = homeDirsForDisplay(cwd);
+  homeIdleNotificationDisplayDirs = displayHomeDirs;
   observeHomeIdleNotificationSessions(sessions, recentAgentSessions, displayHomeDirs);
   const launchCwdState = useLocalStorageState("tuiui-launch-cwd", cwd.cwd);
   const launchCommandOrder = ["codex", "claude", "opencode"];
