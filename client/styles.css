@@ -74,7 +74,7 @@ button:disabled {
 }
 
 .session-appbar {
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
   gap: 8px;
   min-height: 38px;
   border-bottom: 0;
@@ -92,6 +92,28 @@ button:disabled {
 .muted {
   color: #9ca8b6;
   font-size: 11px;
+}
+
+.idle-notification-toggle {
+  justify-self: end;
+  min-height: 30px;
+  border-color: #34404d;
+  background: #20262e;
+  color: #d6dde7;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.idle-notification-toggle[aria-pressed="true"][data-notification-permission="granted"] {
+  border-color: #647028;
+  background: #d8f36a;
+  color: #111418;
+}
+
+.idle-notification-toggle[aria-pressed="true"]:not([data-notification-permission="granted"]) {
+  border-color: #6f5a2a;
+  background: #2b2619;
+  color: #f0d18d;
 }
 
 .cwd {

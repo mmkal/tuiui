@@ -1,11 +1,11 @@
 ---
-status: ready-for-implementation
+status: ready-for-review
 size: medium
 ---
 
 # Browser Agent Idle Notifications
 
-Status: Ready for a bedtime implementation pass. The first slice should ship opt-in native browser notifications for live TUI UI sessions when they transition from busy to idle, with duplicate suppression and an in-app toast fallback. Out of scope for this pass: service workers, notifications after the browser tab is closed, and a global watchlist for agents outside this TUI UI server.
+Status: First client-only slice is implemented and tested. The visible opt-in control, transition tracking, duplicate suppression, native click routing for live session routes, and in-app fallback are done; only manual backgrounded Chrome notification verification remains.
 
 ## Goal
 
@@ -27,14 +27,14 @@ When the Notification API is unavailable or denied, show one normal in-app toast
 
 ## Checklist
 
-- [ ] Identify and reuse the current client-side polling/status update paths for session detail and home/recent-session views.
-- [ ] Add transition tracking so notifications fire only on `busy` to `idle`, never for initially idle sessions.
-- [ ] Add an explicit browser-notification permission request flow from a visible control.
-- [ ] Include enough context in the notification to identify the provider/title and working directory or task.
-- [ ] Suppress duplicate notifications across rapid polling refreshes and page reload initialization.
-- [ ] Fall back to an in-app toast when browser notifications are denied or unavailable.
-- [ ] Wire notification clicks to the relevant session route when possible.
-- [ ] Add focused tests for transition detection, duplicate suppression, fallback behavior, and no notification on initially idle sessions.
+- [x] Identify and reuse the current client-side polling/status update paths for session detail and home/recent-session views. _Wired observation through `renderSessionPayload`, added a small busy-session idle refresh, and polls home session/recent-agent payloads in `client/app.ts`._
+- [x] Add transition tracking so notifications fire only on `busy` to `idle`, never for initially idle sessions. _Implemented previous-status tracking in `client/idle-notifications.ts`._
+- [x] Add an explicit browser-notification permission request flow from a visible control. _Added the `Idle alerts` toggle to home and session topbars; it only calls `Notification.requestPermission()` from click handling._
+- [x] Include enough context in the notification to identify the provider/title and working directory or task. _Notification titles include provider/title, and bodies include cwd plus task/command context._
+- [x] Suppress duplicate notifications across rapid polling refreshes and page reload initialization. _The helper updates status before delivery and only emits on an observed `busy` -> `idle` edge._
+- [x] Fall back to an in-app toast when browser notifications are denied or unavailable. _The helper sends the same transition through `showToast` when native notifications are not granted._
+- [x] Wire notification clicks to the relevant session route when possible. _Native click handlers focus/open `/sessions/:id` for live TUI sessions._
+- [x] Add focused tests for transition detection, duplicate suppression, fallback behavior, and no notification on initially idle sessions. _Added `test/browser-idle-notifications.test.ts` plus a Playwright control smoke in `spec/tuiui.spec.ts`._
 - [ ] Manually verify the browser notification behavior in Chrome with the TUI UI tab backgrounded if the local environment permits it.
 
 ## Open Questions
@@ -48,3 +48,4 @@ When the Notification API is unavailable or denied, show one normal in-app toast
 
 - 2026-05-13: Captured task after confirming there was no active task, branch, PR, or code path for native browser notifications on idle transitions.
 - 2026-05-13: Bedtime scope narrowed to an opt-in browser-client implementation over existing session payloads; service-worker/background delivery is intentionally deferred.
+- 2026-05-13: Implemented the client-only notification helper, visible opt-in control, session/home observation hooks, native click routing for live sessions, and toast fallback. Verified with focused Bun tests, one Playwright permission-control smoke, one existing session-detail smoke, and typecheck.

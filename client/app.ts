@@ -16,6 +16,11 @@ import {
 import { parseCommandLine } from "../src/command-line.ts";
 import { stringify as stringifyYaml } from "yaml";
 import { attachmentUploadName, dedupeClipboardImageFiles, type AttachmentSource } from "./attachments.ts";
+import {
+  BrowserIdleNotifications,
+  type IdleNotificationNativeApi,
+  type IdleNotificationSession,
+} from "./idle-notifications.ts";
 import { showToast } from "./toast.ts";
 import {
   createBrowserVoiceRecognizer,
@@ -199,6 +204,17 @@ type RecentAgentSession = {
   args: string[];
 };
 
+type SessionListItem = {
+  id: string;
+  title: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  updatedAt: string;
+  lifecycle: "running" | "exited";
+  status: "busy" | "idle" | "exited";
+};
+
 type LaunchSessionInput = {
   command: string;
   args: string[];
@@ -264,6 +280,15 @@ let voiceLoop: VoiceLoop | null = null;
 let unsubscribeVoiceLoop: (() => void) | null = null;
 let voiceReadbackTimer: number | null = null;
 let composerAttachments: ComposerAttachment[] = [];
+let sessionIdleRefreshTimer: number | null = null;
+let homeIdleNotificationPollTimer: number | null = null;
+
+const idleNotifications = new BrowserIdleNotifications({
+  storage: window.localStorage,
+  notifications: nativeIdleNotificationApi(),
+  showToast,
+  openRoute: openIdleNotificationRoute,
+});
 
 const terminalHttpLinkHandler: ILinkHandler = {
   activate(event, uri) {
@@ -323,6 +348,204 @@ function incrementPageLoadCount() {
   }
 }
 
+function nativeIdleNotificationApi(): IdleNotificationNativeApi | null {
+  if (!("Notification" in window) || !window.Notification) {
+    return null;
+  }
+  return {
+    get permission() {
+      return window.Notification.permission;
+    },
+    async requestPermission() {
+      return await window.Notification.requestPermission();
+    },
+    create(title: string, options: NotificationOptions) {
+      return new window.Notification(title, options);
+    },
+  };
+}
+
+function openIdleNotificationRoute(path: string) {
+  window.focus();
+  if (!path || location.pathname === path) {
+    return;
+  }
+  history.pushState({}, "", path);
+  void renderRoute();
+}
+
+function renderIdleNotificationControl() {
+  const state = idleNotifications.getControlState();
+  return `
+    <button
+      type="button"
+      class="idle-notification-toggle"
+      data-action="toggle-idle-notifications"
+      data-testid="idle-notification-toggle"
+      data-notification-permission="${escapeAttr(state.permission)}"
+      aria-pressed="${state.enabled}"
+      title="${escapeAttr(state.description)}"
+    >${escapeHtml(state.label)}</button>
+  `;
+}
+
+function bindIdleNotificationControls() {
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-action='toggle-idle-notifications']")) {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      const current = idleNotifications.getControlState();
+      const next = current.enabled && current.permission !== "default"
+        ? idleNotifications.disable()
+        : await idleNotifications.enableFromUserGesture();
+      updateIdleNotificationControls();
+      showIdleNotificationControlToast(next);
+      button.disabled = false;
+    });
+  }
+  updateIdleNotificationControls();
+}
+
+function updateIdleNotificationControls() {
+  const state = idleNotifications.getControlState();
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-action='toggle-idle-notifications']")) {
+    button.textContent = state.label;
+    button.title = state.description;
+    button.dataset.notificationPermission = state.permission;
+    button.setAttribute("aria-pressed", String(state.enabled));
+  }
+}
+
+function showIdleNotificationControlToast(state: ReturnType<BrowserIdleNotifications["getControlState"]>) {
+  showToast({
+    id: "idle-notification-control",
+    title: state.enabled ? "Idle alerts enabled" : "Idle alerts disabled",
+    message: state.description,
+    durationMs: 4_000,
+  });
+}
+
+function observeHomeIdleNotificationSessions(
+  sessions: SessionListItem[],
+  recentAgentSessions: RecentAgentSession[],
+  displayHomeDirs: string[],
+) {
+  idleNotifications.observe([
+    ...sessions.map((session) => sessionListItemIdleNotification(session, displayHomeDirs)),
+    ...recentAgentSessions.map((session) => recentAgentSessionIdleNotification(session, displayHomeDirs)),
+  ]);
+}
+
+function startHomeIdleNotificationPolling(displayHomeDirs: string[]) {
+  stopHomeIdleNotificationPolling();
+  homeIdleNotificationPollTimer = window.setInterval(() => {
+    void pollHomeIdleNotificationSessions(displayHomeDirs);
+  }, 5_000);
+}
+
+function stopHomeIdleNotificationPolling() {
+  if (homeIdleNotificationPollTimer === null) {
+    return;
+  }
+  window.clearInterval(homeIdleNotificationPollTimer);
+  homeIdleNotificationPollTimer = null;
+}
+
+async function pollHomeIdleNotificationSessions(displayHomeDirs: string[]) {
+  try {
+    const [sessions, recentAgentSessions] = await Promise.all([
+      api<SessionListItem[]>("/api/sessions"),
+      api<RecentAgentSession[]>("/api/agent-sessions/recent"),
+    ]);
+    observeHomeIdleNotificationSessions(sessions, recentAgentSessions, displayHomeDirs);
+  } catch {
+  }
+}
+
+function scheduleSessionIdleRefresh(payload: SessionPayload) {
+  clearSessionIdleRefreshTimer();
+  if (payload.lifecycle !== "running" || payload.status !== "busy") {
+    return;
+  }
+  sessionIdleRefreshTimer = window.setTimeout(() => {
+    sessionIdleRefreshTimer = null;
+    if (activeSession?.id !== payload.id) {
+      return;
+    }
+    void api<SessionPayload>(`/api/sessions/${payload.id}`)
+      .then((nextPayload) => {
+        if (eventsPaused) {
+          idleNotifications.observeOne(sessionPayloadIdleNotification(nextPayload));
+          scheduleSessionIdleRefresh(nextPayload);
+          return;
+        }
+        renderSessionPayload(nextPayload);
+      })
+      .catch(() => undefined);
+  }, 1_250);
+}
+
+function clearSessionIdleRefreshTimer() {
+  if (sessionIdleRefreshTimer === null) {
+    return;
+  }
+  window.clearTimeout(sessionIdleRefreshTimer);
+  sessionIdleRefreshTimer = null;
+}
+
+function sessionPayloadIdleNotification(payload: SessionPayload): IdleNotificationSession {
+  const displayHomeDirs = homeDirsForDisplay({ cwd: payload.cwd });
+  return {
+    key: `tuiui:${payload.id}`,
+    providerLabel: providerLabelForCommand(payload.sdk.provider, payload.command),
+    title: payload.title || payload.command,
+    cwd: formatPathForDisplay(payload.cwd, displayHomeDirs),
+    task: payload.sdk.summary?.latestUserText || payload.semantic.prompt || [payload.command, ...payload.args].join(" "),
+    status: payload.status,
+    routePath: `/sessions/${payload.id}`,
+  };
+}
+
+function sessionListItemIdleNotification(session: SessionListItem, displayHomeDirs: string[]): IdleNotificationSession {
+  return {
+    key: `tuiui:${session.id}`,
+    providerLabel: providerLabelForCommand("", session.command),
+    title: session.title || session.command,
+    cwd: formatPathForDisplay(session.cwd, displayHomeDirs),
+    task: [session.command, ...session.args].join(" "),
+    status: session.status,
+    routePath: `/sessions/${session.id}`,
+  };
+}
+
+function recentAgentSessionIdleNotification(
+  session: RecentAgentSession,
+  displayHomeDirs: string[],
+): IdleNotificationSession {
+  return {
+    key: `agent:${session.provider}:${session.id}`,
+    providerLabel: providerLabel(session.provider),
+    title: session.title || session.id,
+    cwd: formatPathForDisplay(session.cwd, displayHomeDirs),
+    task: session.latestUserText || session.initialUserText || session.command,
+    status: formatRecentSessionStatus(session),
+    routePath: "",
+  };
+}
+
+function providerLabelForCommand(provider: string, command: string) {
+  const value = `${provider} ${command}`.toLowerCase();
+  if (value.includes("opencode")) {
+    return "OpenCode";
+  }
+  if (value.includes("claude")) {
+    return "Claude";
+  }
+  if (value.includes("codex")) {
+    return "Codex";
+  }
+  return "Agent";
+}
+
 function setupPromptboxState(sessionId: string, promptbox: HTMLTextAreaElement) {
   const state = useLocalStorageState(promptboxStorageKey(sessionId), "");
   promptbox.value = state.getValue();
@@ -373,6 +596,8 @@ async function renderRoute() {
   events = null;
   eventsPaused = false;
   stopTerminalAutoResize();
+  clearSessionIdleRefreshTimer();
+  stopHomeIdleNotificationPolling();
   destroyXterm();
   activeSession = null;
   destroyDataEditor();
@@ -432,11 +657,12 @@ async function fetchSessionRecovery(sessionId: string) {
 async function renderHome() {
   const [cwd, sessions, commands, recentAgentSessions] = await Promise.all([
     api<{ cwd: string; homeDir?: string; homeDirs?: string[] }>("/api/cwd"),
-    api<any[]>("/api/sessions"),
+    api<SessionListItem[]>("/api/sessions"),
     api<CommandPreset[]>("/api/commands"),
     api<RecentAgentSession[]>("/api/agent-sessions/recent"),
   ]);
   const displayHomeDirs = homeDirsForDisplay(cwd);
+  observeHomeIdleNotificationSessions(sessions, recentAgentSessions, displayHomeDirs);
   const launchCwdState = useLocalStorageState("tuiui-launch-cwd", cwd.cwd);
   const launchCommandOrder = ["codex", "claude", "opencode"];
   const quickLaunchCommands = launchCommandOrder
@@ -448,6 +674,7 @@ async function renderHome() {
       <header class="topbar">
         <a class="brand" href="/">tuiui</a>
         <span class="muted" data-testid="session-count">${sessions.length} sessions</span>
+        ${renderIdleNotificationControl()}
       </header>
       <section class="launcher" aria-label="Launch session">
         <form id="launch-form" class="launch-form">
@@ -521,6 +748,8 @@ async function renderHome() {
       </section>
     </main>
   `;
+  bindIdleNotificationControls();
+  startHomeIdleNotificationPolling(displayHomeDirs);
 
   const form = document.getElementById("launch-form") as HTMLFormElement;
   const commandInput = form.elements.namedItem("commandLine") as HTMLInputElement;
@@ -642,6 +871,7 @@ async function renderSession(sessionId: string) {
         <a class="brand" href="/">tuiui</a>
         <code class="command app-title" title="${escapeAttr([payload.command, ...payload.args].join(" "))}" data-testid="session-command">${escapeHtml(payload.title || payload.command)}</code>
         <span class="status-pill" data-state="${payload.status}" data-testid="session-status">${payload.status}</span>
+        ${renderIdleNotificationControl()}
         <details class="session-menu">
           <summary class="menu-button" role="button" aria-label="Session menu">☰</summary>
           <div class="floating-overlay session-menu-overlay">
@@ -725,6 +955,7 @@ async function renderSession(sessionId: string) {
     </main>
   `;
 
+  bindIdleNotificationControls();
   bindSessionControls(sessionId);
   renderSessionPayload(payload);
   subscribe(sessionId);
@@ -1358,6 +1589,8 @@ function renderSessionPayload(
   }
   activeSession = payload;
   document.title = `${payload.title || payload.command} · TUI UI`;
+  idleNotifications.observeOne(sessionPayloadIdleNotification(payload));
+  scheduleSessionIdleRefresh(payload);
 
   const status = document.querySelector<HTMLElement>("[data-testid='session-status']");
   if (status) {

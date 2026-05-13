@@ -43,6 +43,48 @@ test("shows a page-load toast on each full document load when opted in", async (
   await expect(page.getByTestId("page-load-toast")).toContainText("Page loaded #2");
 });
 
+test("requests idle notification permission only after the explicit control is clicked", async ({ page, ctx }) => {
+  await page.addInitScript(() => {
+    const notificationState = { requests: 0 };
+    class TestNotification {
+      static permission: NotificationPermission = "default";
+      onclick: ((event: Event) => void) | null = null;
+
+      constructor(_title: string, _options: NotificationOptions) {
+      }
+
+      static async requestPermission() {
+        notificationState.requests += 1;
+        TestNotification.permission = "granted";
+        return TestNotification.permission;
+      }
+
+      close() {
+      }
+    }
+
+    Object.defineProperty(window, "__tuiuiNotificationTest", {
+      configurable: true,
+      value: notificationState,
+    });
+    Object.defineProperty(window, "Notification", {
+      configurable: true,
+      value: TestNotification,
+    });
+  });
+
+  await page.goto(ctx.baseUrl);
+
+  await expect(page.getByTestId("idle-notification-toggle")).toHaveText("Idle alerts: off");
+  expect(await page.evaluate(() => (window as any).__tuiuiNotificationTest.requests)).toBe(0);
+
+  await page.getByTestId("idle-notification-toggle").click();
+
+  await expect(page.getByTestId("idle-notification-toggle")).toHaveText("Idle alerts: browser");
+  expect(await page.evaluate(() => (window as any).__tuiuiNotificationTest.requests)).toBe(1);
+  expect(await page.evaluate(() => localStorage.getItem("tuiui-browser-idle-notifications-enabled"))).toBe("1");
+});
+
 test("shows a compact recovery command for a missing session", async ({ page, ctx }) => {
   await page.route("**/api/sessions/tuiui_missing", async (route) => {
     await route.fulfill({
