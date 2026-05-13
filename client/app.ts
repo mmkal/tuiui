@@ -17,6 +17,7 @@ import { parseCommandLine } from "../src/command-line.ts";
 import { stringify as stringifyYaml } from "yaml";
 import { attachmentUploadName, dedupeClipboardImageFiles, type AttachmentSource } from "./attachments.ts";
 import { showToast } from "./toast.ts";
+import type { CoordinatorAgentSummary, CoordinatorSummary } from "../src/meta-agent-coordinator.ts";
 import {
   createBrowserVoiceRecognizer,
   createBrowserVoiceSpeaker,
@@ -238,6 +239,20 @@ type StoredChord = {
   lastUsedAt: string;
 };
 
+type CoordinatorAuditEntry = {
+  id: string;
+  tone: "info" | "success" | "error";
+  createdAt: string;
+  text: string;
+  targetId: string;
+  prompt: string;
+};
+
+type PendingCoordinatorForward = {
+  target: string;
+  text: string;
+};
+
 const app = document.getElementById("app")!;
 let events: EventSource | null = null;
 let activeSession: SessionPayload | null = null;
@@ -264,6 +279,8 @@ let voiceLoop: VoiceLoop | null = null;
 let unsubscribeVoiceLoop: (() => void) | null = null;
 let voiceReadbackTimer: number | null = null;
 let composerAttachments: ComposerAttachment[] = [];
+let coordinatorAuditEvents: CoordinatorAuditEntry[] = [];
+let coordinatorPendingForward: PendingCoordinatorForward | null = null;
 
 const terminalHttpLinkHandler: ILinkHandler = {
   activate(event, uri) {
@@ -430,13 +447,15 @@ async function fetchSessionRecovery(sessionId: string) {
 }
 
 async function renderHome() {
-  const [cwd, sessions, commands, recentAgentSessions] = await Promise.all([
+  const [cwd, sessions, commands, recentAgentSessions, coordinatorSummary] = await Promise.all([
     api<{ cwd: string; homeDir?: string; homeDirs?: string[] }>("/api/cwd"),
     api<any[]>("/api/sessions"),
     api<CommandPreset[]>("/api/commands"),
     api<RecentAgentSession[]>("/api/agent-sessions/recent"),
+    api<CoordinatorSummary>("/api/coordinator/summary"),
   ]);
   const displayHomeDirs = homeDirsForDisplay(cwd);
+  recordCoordinatorObservation(coordinatorSummary);
   const launchCwdState = useLocalStorageState("tuiui-launch-cwd", cwd.cwd);
   const launchCommandOrder = ["codex", "claude", "opencode"];
   const quickLaunchCommands = launchCommandOrder
@@ -480,6 +499,7 @@ async function renderHome() {
           </div>
         </form>
       </section>
+      ${renderCoordinatorPanel(coordinatorSummary, displayHomeDirs)}
       ${recentAgentSessions.length ? `
         <section class="recent-agents" aria-label="Recent agent sessions">
           <header>
@@ -528,6 +548,7 @@ async function renderHome() {
   const fakeAgentInput = form.elements.namedItem("fakeagent") as HTMLInputElement;
   const presets = new Map(commands.map((command) => [command.id, command]));
   const recentAgentSessionsByKey = new Map(recentAgentSessions.map((session) => [`${session.provider}:${session.id}`, session]));
+  bindCoordinatorControls(coordinatorSummary, displayHomeDirs);
 
   cwdInput.addEventListener("input", () => {
     launchCwdState.setValue(cwdInput.value);
@@ -626,6 +647,249 @@ async function renderHome() {
     history.pushState({}, "", `/sessions/${result.id}`);
     await renderRoute();
   }
+}
+
+function renderCoordinatorPanel(summary: CoordinatorSummary, homeDirs: string[]) {
+  const liveAgents = summary.agents.filter((agent) => agent.kind === "live");
+  const recentAgents = summary.agents.filter((agent) => agent.kind === "recent");
+  const forwardTargets = summary.agents.filter((agent) => agent.forwardable);
+  return `
+    <section id="coordinator-panel" class="coordinator-panel" data-testid="coordinator-panel" aria-label="Coordinator">
+      <header>
+        <div>
+          <strong>Coordinator</strong>
+          <span>${summary.counts.live} live · ${summary.counts.recent} recent · ${summary.counts.forwardable} targets</span>
+        </div>
+        <button type="button" class="secondary-button" data-action="coordinator-refresh">Refresh</button>
+      </header>
+      <div class="coordinator-observations" data-testid="coordinator-observations">
+        ${summary.observations.map((observation) => `
+          <p data-severity="${escapeAttr(observation.severity)}">${escapeHtml(observation.text)}</p>
+        `).join("")}
+      </div>
+      <div class="coordinator-grid">
+        <section class="coordinator-agents" aria-label="State of the agents">
+          <header>
+            <strong>State</strong>
+            <span>${liveAgents.length} live, ${recentAgents.length} recent</span>
+          </header>
+          <div class="coordinator-agent-list">
+            ${summary.agents.length ? summary.agents.slice(0, 8).map((agent) => renderCoordinatorAgentCard(agent, homeDirs)).join("") : `<p class="empty">No agent sessions observed</p>`}
+          </div>
+        </section>
+        <section class="coordinator-forward" aria-label="Prompt forwarding">
+          <form id="coordinator-forward-form">
+            <label>
+              <span>Target live session</span>
+              <select name="target" aria-label="Target live session" required ${forwardTargets.length ? "" : "disabled"}>
+                ${forwardTargets.length ? forwardTargets.map((agent) => `
+                  <option value="${escapeAttr(agent.id)}">${escapeHtml(coordinatorAgentOptionLabel(agent, homeDirs))}</option>
+                `).join("") : `<option value="">No live sessions</option>`}
+              </select>
+            </label>
+            <label>
+              <span>Coordinator prompt</span>
+              <textarea name="prompt" aria-label="Coordinator prompt" rows="4" spellcheck="false" ${forwardTargets.length ? "" : "disabled"}></textarea>
+            </label>
+            <button type="submit" ${forwardTargets.length ? "" : "disabled"}>Stage prompt</button>
+          </form>
+          ${renderCoordinatorConfirmation(summary)}
+        </section>
+      </div>
+      <section class="coordinator-audit" data-testid="coordinator-audit" aria-label="Coordinator audit trail">
+        <header>
+          <strong>Audit</strong>
+          <span>page session</span>
+        </header>
+        ${coordinatorAuditEvents.length ? `
+          <ol>
+            ${coordinatorAuditEvents.slice(0, 10).map((entry) => `
+              <li data-tone="${escapeAttr(entry.tone)}">
+                <time>${escapeHtml(formatTime(entry.createdAt))}</time>
+                <span>${escapeHtml(entry.text)}</span>
+                ${entry.prompt ? `<code>${escapeHtml(entry.prompt)}</code>` : ""}
+              </li>
+            `).join("")}
+          </ol>
+        ` : `<p class="empty">No coordinator activity yet</p>`}
+      </section>
+    </section>
+  `;
+}
+
+function renderCoordinatorAgentCard(agent: CoordinatorAgentSummary, homeDirs: string[]) {
+  const meta = [
+    coordinatorProviderLabel(agent.provider),
+    agent.branch || "",
+    formatPathForDisplay(agent.cwd, homeDirs),
+  ].filter(Boolean).join(" · ");
+  return `
+    <article class="coordinator-agent-card" data-kind="${escapeAttr(agent.kind)}" data-status="${escapeAttr(agent.status)}">
+      <header>
+        <span class="status-dot" data-state="${escapeAttr(agent.status)}" aria-hidden="true"></span>
+        <strong title="${escapeAttr(agent.title)}">${escapeHtml(agent.title || agent.command || agent.id)}</strong>
+        <span>${escapeHtml(agent.kind)}</span>
+      </header>
+      <p>${escapeHtml(agent.currentTask || "No task summary available.")}</p>
+      <footer>
+        <code title="${escapeAttr(meta)}">${escapeHtml(meta || agent.id)}</code>
+        <span title="${escapeAttr(agent.confidence.reasons.join(", "))}">
+          ${escapeHtml(agent.freshness.level)} · ${escapeHtml(agent.confidence.label)}
+        </span>
+      </footer>
+    </article>
+  `;
+}
+
+function renderCoordinatorConfirmation(summary: CoordinatorSummary) {
+  if (!coordinatorPendingForward) {
+    return `<div id="coordinator-confirmation" class="coordinator-confirmation" hidden></div>`;
+  }
+  const target = findCoordinatorAgent(summary, coordinatorPendingForward.target);
+  if (!target || !target.forwardable) {
+    return `
+      <div id="coordinator-confirmation" class="coordinator-confirmation" data-state="error" role="status">
+        <strong>Target unavailable</strong>
+        <p>The selected live session is no longer available for forwarding.</p>
+        <button type="button" class="secondary-button" data-action="coordinator-cancel-forward">Cancel</button>
+      </div>
+    `;
+  }
+  return `
+    <div id="coordinator-confirmation" class="coordinator-confirmation" data-state="pending" role="region" aria-label="Confirm coordinator prompt">
+      <strong>Confirm forward</strong>
+      <p>Send this prompt to <span>${escapeHtml(target.title || target.id)}</span>.</p>
+      <pre>${escapeHtml(coordinatorPendingForward.text)}</pre>
+      <div>
+        <button type="button" data-action="coordinator-confirm-forward">Confirm forward</button>
+        <button type="button" class="secondary-button" data-action="coordinator-cancel-forward">Cancel</button>
+      </div>
+    </div>
+  `;
+}
+
+function bindCoordinatorControls(summary: CoordinatorSummary, homeDirs: string[]) {
+  document.querySelector<HTMLButtonElement>("[data-action='coordinator-refresh']")?.addEventListener("click", async () => {
+    const nextSummary = await api<CoordinatorSummary>("/api/coordinator/summary");
+    recordCoordinatorObservation(nextSummary);
+    renderCoordinatorPanelInto(nextSummary, homeDirs);
+  });
+
+  const form = document.getElementById("coordinator-forward-form") as HTMLFormElement | null;
+  form?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const target = form.elements.namedItem("target") as HTMLSelectElement;
+    const prompt = form.elements.namedItem("prompt") as HTMLTextAreaElement;
+    const text = prompt.value.trim();
+    if (!target.value || !text) {
+      return;
+    }
+    coordinatorPendingForward = {
+      target: target.value,
+      text,
+    };
+    renderCoordinatorPanelInto(summary, homeDirs);
+  });
+
+  document.querySelector<HTMLButtonElement>("[data-action='coordinator-cancel-forward']")?.addEventListener("click", () => {
+    coordinatorPendingForward = null;
+    renderCoordinatorPanelInto(summary, homeDirs);
+  });
+
+  document.querySelector<HTMLButtonElement>("[data-action='coordinator-confirm-forward']")?.addEventListener("click", async () => {
+    if (!coordinatorPendingForward) {
+      return;
+    }
+    const pending = coordinatorPendingForward;
+    try {
+      const result = await api<{ forwardedAt: string; target: { id: string; title: string } }>("/api/coordinator/forward", {
+        method: "POST",
+        body: JSON.stringify({
+          target: pending.target,
+          text: pending.text,
+          submit: true,
+          confirmed: true,
+        }),
+      });
+      coordinatorPendingForward = null;
+      addCoordinatorAuditEvent({
+        tone: "success",
+        text: `Forwarded prompt to ${result.target.title || result.target.id}.`,
+        targetId: result.target.id,
+        prompt: pending.text,
+        createdAt: result.forwardedAt,
+      });
+      const nextSummary = await api<CoordinatorSummary>("/api/coordinator/summary");
+      renderCoordinatorPanelInto(nextSummary, homeDirs);
+    } catch (error) {
+      addCoordinatorAuditEvent({
+        tone: "error",
+        text: `Forward failed: ${String(error instanceof Error ? error.message : error)}`,
+        targetId: pending.target,
+        prompt: pending.text,
+        createdAt: new Date().toISOString(),
+      });
+      renderCoordinatorPanelInto(summary, homeDirs);
+    }
+  });
+}
+
+function renderCoordinatorPanelInto(summary: CoordinatorSummary, homeDirs: string[]) {
+  const panel = document.getElementById("coordinator-panel");
+  if (!panel) {
+    return;
+  }
+  panel.outerHTML = renderCoordinatorPanel(summary, homeDirs);
+  bindCoordinatorControls(summary, homeDirs);
+}
+
+function recordCoordinatorObservation(summary: CoordinatorSummary) {
+  const existingId = `observed:${summary.generatedAt}`;
+  if (coordinatorAuditEvents.some((entry) => entry.id === existingId)) {
+    return;
+  }
+  const primary = summary.observations[0]?.text || `${summary.counts.agents} sessions observed.`;
+  const entry: CoordinatorAuditEntry = {
+    id: existingId,
+    tone: "info",
+    createdAt: summary.generatedAt,
+    text: `Observed ${primary}`,
+    targetId: "",
+    prompt: "",
+  };
+  coordinatorAuditEvents = [entry, ...coordinatorAuditEvents].slice(0, 20);
+}
+
+function addCoordinatorAuditEvent(input: Omit<CoordinatorAuditEntry, "id">) {
+  coordinatorAuditEvents = [{
+    id: `coordinator-audit-${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`,
+    ...input,
+  }, ...coordinatorAuditEvents].slice(0, 20);
+}
+
+function findCoordinatorAgent(summary: CoordinatorSummary, target: string) {
+  return summary.agents.find((agent) => {
+    return agent.id === target || agent.stableId === target || agent.providerSessionId === target;
+  }) || null;
+}
+
+function coordinatorAgentOptionLabel(agent: CoordinatorAgentSummary, homeDirs: string[]) {
+  const provider = coordinatorProviderLabel(agent.provider);
+  const cwd = formatPathForDisplay(agent.cwd, homeDirs);
+  return [agent.title || agent.command || agent.id, provider, agent.branch || cwd].filter(Boolean).join(" · ");
+}
+
+function coordinatorProviderLabel(provider: CoordinatorAgentSummary["provider"]) {
+  if (provider === "opencode") {
+    return "OpenCode";
+  }
+  if (provider === "codex") {
+    return "Codex";
+  }
+  if (provider === "claude") {
+    return "Claude";
+  }
+  return "terminal";
 }
 
 async function renderSession(sessionId: string) {
