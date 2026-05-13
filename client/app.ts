@@ -21,7 +21,6 @@ import {
   type IdleNotificationNativeApi,
   type IdleNotificationSession,
 } from "./idle-notifications.ts";
-import { callOrpcJsonApi } from "./orpc-client.ts";
 import { showToast } from "./toast.ts";
 import {
   createBrowserVoiceRecognizer,
@@ -454,54 +453,8 @@ function observeHomeIdleNotificationSessions(
   ]);
 }
 
-function primeHomeIdleNotificationSessions(
-  sessions: SessionListItem[],
-  recentAgentSessions: RecentAgentSession[],
-  displayHomeDirs: string[],
-) {
-  idleNotifications.prime([
-    ...sessions.map((session) => sessionListItemIdleNotification(session, displayHomeDirs)),
-    ...recentAgentSessions.map((session) => recentAgentSessionIdleNotification(session, displayHomeDirs)),
-  ]);
-}
-
-async function primeIdleNotificationSnapshotForCurrentRoute() {
-  try {
-    if (activeSession) {
-      const payload = await api<SessionPayload>(`/api/sessions/${activeSession.id}`);
-      activeSession = payload;
-      idleNotifications.primeOne(sessionPayloadIdleNotification(payload));
-      scheduleSessionIdleRefresh(payload);
-      return;
-    }
-
-    const [cwd, sessions, recentAgentSessions] = await Promise.all([
-      api<{ cwd: string; homeDir?: string; homeDirs?: string[] }>("/api/cwd"),
-      api<SessionListItem[]>("/api/sessions"),
-      api<RecentAgentSession[]>("/api/agent-sessions/recent"),
-    ]);
-    homeIdleNotificationDisplayDirs = homeDirsForDisplay(cwd);
-    primeHomeIdleNotificationSessions(sessions, recentAgentSessions, homeIdleNotificationDisplayDirs);
-  } catch {
-  }
-}
-
-function startIdleNotificationPollingForCurrentRoute() {
-  if (!idleNotifications.isEnabled()) {
-    return;
-  }
-  if (activeSession) {
-    scheduleSessionIdleRefresh(activeSession);
-    return;
-  }
-  startHomeIdleNotificationPolling(homeIdleNotificationDisplayDirs);
-}
-
 function startHomeIdleNotificationPolling(displayHomeDirs: string[]) {
   stopHomeIdleNotificationPolling();
-  if (!idleNotifications.isEnabled()) {
-    return;
-  }
   homeIdleNotificationPollTimer = window.setInterval(() => {
     void pollHomeIdleNotificationSessions(displayHomeDirs);
   }, 5_000);
@@ -528,7 +481,7 @@ async function pollHomeIdleNotificationSessions(displayHomeDirs: string[]) {
 
 function scheduleSessionIdleRefresh(payload: SessionPayload) {
   clearSessionIdleRefreshTimer();
-  if (!idleNotifications.isEnabled() || payload.lifecycle !== "running" || payload.status !== "busy") {
+  if (payload.lifecycle !== "running" || payload.status !== "busy") {
     return;
   }
   sessionIdleRefreshTimer = window.setTimeout(() => {
@@ -727,10 +680,7 @@ async function renderHome() {
     api<RecentAgentSession[]>("/api/agent-sessions/recent"),
   ]);
   const displayHomeDirs = homeDirsForDisplay(cwd);
-  homeIdleNotificationDisplayDirs = displayHomeDirs;
-  if (idleNotifications.isEnabled()) {
-    observeHomeIdleNotificationSessions(sessions, recentAgentSessions, displayHomeDirs);
-  }
+  observeHomeIdleNotificationSessions(sessions, recentAgentSessions, displayHomeDirs);
   const launchCwdState = useLocalStorageState("tuiui-launch-cwd", cwd.cwd);
   const launchCommandOrder = ["codex", "claude", "opencode"];
   const quickLaunchCommands = launchCommandOrder
@@ -1657,10 +1607,8 @@ function renderSessionPayload(
   }
   activeSession = payload;
   document.title = `${payload.title || payload.command} · TUI UI`;
-  if (idleNotifications.isEnabled()) {
-    idleNotifications.observeOne(sessionPayloadIdleNotification(payload));
-    scheduleSessionIdleRefresh(payload);
-  }
+  idleNotifications.observeOne(sessionPayloadIdleNotification(payload));
+  scheduleSessionIdleRefresh(payload);
 
   const status = document.querySelector<HTMLElement>("[data-testid='session-status']");
   if (status) {
@@ -3097,12 +3045,6 @@ function keyNameFromKeyboardEvent(event: KeyboardEvent) {
 }
 
 async function api<T>(path: string, init: RequestInit = {}) {
-  const orpcResult = await callOrpcJsonApi<T>(path, init);
-  if (orpcResult.handled) {
-    return orpcResult.value;
-  }
-
-  // SSE, stdout polling, uploads, and SVG responses stay on the legacy handlers for now.
   const response = await fetch(path, {
     ...init,
     headers: {
