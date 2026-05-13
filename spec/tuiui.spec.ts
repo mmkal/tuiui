@@ -86,28 +86,23 @@ test("requests idle notification permission only after the explicit control is c
 });
 
 test("does not poll home idle notification snapshots before opt in", async ({ page, ctx }) => {
-  let sessionListRequests = 0;
-  let recentAgentRequests = 0;
-  await page.route("**/api/sessions", async (route) => {
-    if (new URL(route.request().url()).pathname === "/api/sessions") {
-      sessionListRequests += 1;
+  let jsonApiRequests = 0;
+  await page.route("**/*", async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname.startsWith("/api/") || pathname.startsWith("/rpc")) {
+      jsonApiRequests += 1;
     }
-    await route.continue();
-  });
-  await page.route("**/api/agent-sessions/recent", async (route) => {
-    recentAgentRequests += 1;
     await route.continue();
   });
 
   await page.goto(ctx.baseUrl);
   await expect(page.getByTestId("idle-notification-toggle")).toHaveText("Idle alerts: off");
-  expect(sessionListRequests).toBe(1);
-  expect(recentAgentRequests).toBe(1);
+  const requestsAfterInitialLoad = jsonApiRequests;
+  expect(requestsAfterInitialLoad).toBeGreaterThan(0);
 
   await page.waitForTimeout(5_300);
 
-  expect(sessionListRequests).toBe(1);
-  expect(recentAgentRequests).toBe(1);
+  expect(jsonApiRequests).toBe(requestsAfterInitialLoad);
 });
 
 test("does not refresh busy session idle status before opt in", async ({ page, ctx }) => {
