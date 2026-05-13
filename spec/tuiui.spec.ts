@@ -442,6 +442,47 @@ test("renders a coordinator summary and forwards prompts only after confirmation
   expect((await fetchSessionPayloadById(page, second.id)).stdinEvents).toHaveLength(0);
 });
 
+test("renders a factory floor station grid from the coordinator summary", async ({ page, ctx }) => {
+  await page.route("**/api/coordinator/summary", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(factoryCoordinatorSummary(ctx.workspaceDir)),
+    });
+  });
+
+  await page.goto(ctx.baseUrl);
+  await expect(page.getByRole("link", { name: "Factory" })).toHaveAttribute("href", "/factory");
+
+  await page.getByRole("link", { name: "Factory" }).click();
+
+  await expect(page).toHaveURL(/\/factory$/);
+  await expect(page.getByTestId("factory-supervisor")).toContainText("2 live sessions");
+  await expect(page.getByTestId("factory-counts")).toHaveText("2 live · 1 recent");
+  await expect(page.getByTestId("factory-station")).toHaveCount(3);
+
+  const busyStation = page.locator(".factory-station[data-state='busy']");
+  await expect(busyStation).toContainText("busy build agent");
+  await expect(busyStation).toContainText("Implementing the factory station renderer.");
+  await expect(busyStation.getByRole("link", { name: "Open" })).toHaveAttribute("href", "/sessions/live-busy");
+
+  const idleStation = page.locator(".factory-station[data-state='idle']");
+  await expect(idleStation).toContainText("idle review agent");
+  await expect(idleStation).toContainText("Ready for inspection.");
+  await expect(idleStation.getByRole("link", { name: "Open" })).toHaveAttribute("href", "/sessions/live-idle");
+
+  const recentStation = page.locator(".factory-station[data-state='recent']");
+  await expect(recentStation).toContainText("recent codex thread");
+  await expect(recentStation).toContainText("Polished the earlier station sketch.");
+  await expect(recentStation.getByRole("link", { name: "Open" })).toHaveCount(0);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByTestId("factory-floor")).toBeVisible();
+  await expect.poll(async () => {
+    return await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1);
+  }).toBe(true);
+});
+
 test("sends named key chords separately from the composer", async ({ page, ctx }) => {
   await launchFakeCodex(page, ctx);
   await clickSessionMenuButton(page, "HTML");
@@ -1194,6 +1235,130 @@ function createTempDirectoryAsDatabasePath(prefix: string) {
     path: directoryPath,
     [Symbol.dispose]() {
       fs.rmSync(directoryPath, { recursive: true, force: true });
+    },
+  };
+}
+
+function factoryCoordinatorSummary(workspaceDir: string) {
+  const generatedAt = "2026-05-13T12:00:00.000Z";
+  return {
+    format: "tuiui.coordinatorSummary.v1",
+    generatedAt,
+    counts: {
+      agents: 3,
+      live: 2,
+      recent: 1,
+      running: 2,
+      busy: 1,
+      idle: 2,
+      exited: 0,
+      stale: 0,
+      forwardable: 2,
+    },
+    agents: [
+      factoryCoordinatorAgent({
+        id: "live-busy",
+        kind: "live",
+        provider: "codex",
+        title: "busy build agent",
+        status: "busy",
+        lifecycle: "running",
+        currentTask: "Implementing the factory station renderer.",
+        cwd: workspaceDir,
+      }),
+      factoryCoordinatorAgent({
+        id: "live-idle",
+        kind: "live",
+        provider: "claude",
+        title: "idle review agent",
+        status: "idle",
+        lifecycle: "running",
+        currentTask: "Ready for inspection.",
+        cwd: workspaceDir,
+      }),
+      factoryCoordinatorAgent({
+        id: "recent:codex:recent-thread",
+        kind: "recent",
+        provider: "codex",
+        providerSessionId: "recent-thread",
+        title: "recent codex thread",
+        status: "idle",
+        lifecycle: "recent",
+        currentTask: "Polished the earlier station sketch.",
+        cwd: workspaceDir,
+        forwardable: false,
+      }),
+    ],
+    authority: {
+      deterministic: true,
+      autonomousProviderBehavior: false,
+      canForwardPrompts: true,
+      requiresConfirmation: true,
+      notes: [],
+    },
+    observations: [{
+      id: "factory-observation-counts",
+      severity: "info",
+      text: "2 live sessions, 1 recent sessions, 2 prompt-forwarding targets.",
+      agentId: "",
+      createdAt: generatedAt,
+    }],
+  };
+}
+
+function factoryCoordinatorAgent(overrides: Record<string, any>) {
+  const kind = overrides.kind || "live";
+  const id = overrides.id || "live-agent";
+  return {
+    id,
+    stableId: `${kind}:${id}`,
+    kind,
+    provider: overrides.provider || "codex",
+    providerSessionId: overrides.providerSessionId || id,
+    title: overrides.title || id,
+    command: overrides.command || "codex",
+    args: overrides.args || [],
+    cwd: overrides.cwd || "",
+    branch: overrides.branch || "bedtime/factory-floor-agent-ui",
+    worktree: overrides.worktree || "factory-floor-agent-ui",
+    gitHead: "abc1234",
+    lifecycle: overrides.lifecycle || "running",
+    status: overrides.status || "idle",
+    createdAt: "2026-05-13T11:45:00.000Z",
+    updatedAt: "2026-05-13T11:59:00.000Z",
+    lastActivityAt: "2026-05-13T11:59:00.000Z",
+    currentTask: overrides.currentTask || "",
+    blockers: [],
+    pendingUserDecisions: [],
+    taskFiles: ["tasks/factory-floor-agent-ui.md"],
+    prLinks: ["PR #9"],
+    latestUserText: "",
+    latestAssistantText: "",
+    recoveryCommand: "",
+    recoveryCreatedAt: "",
+    freshness: {
+      level: "fresh",
+      observedAt: "2026-05-13T12:00:00.000Z",
+      sourceUpdatedAt: "2026-05-13T11:59:00.000Z",
+      ageMs: 60_000,
+    },
+    confidence: {
+      label: "high",
+      score: 0.9,
+      reasons: ["test fixture"],
+    },
+    forwardable: overrides.forwardable !== false,
+    metadata: {
+      source: kind === "live" ? "runtime" : "provider-history",
+      sdkState: "ready",
+      sdkUpdatedAt: "2026-05-13T11:59:00.000Z",
+      providerStatus: "",
+      sidecarSummaryStatus: "",
+      messageCount: 2,
+      stdinEventCount: 0,
+      stdoutEventCount: 0,
+      exitCode: null,
+      recoverable: false,
     },
   };
 }

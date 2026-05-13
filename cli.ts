@@ -260,6 +260,7 @@ function startServer(options: { host: string; port: number; state: ServerState }
     idleTimeout: 255,
     routes: {
       "/": homepage,
+      "/factory": homepage,
       "/sessions": homepage,
       "/sessions/:id": homepage,
       "/health": {

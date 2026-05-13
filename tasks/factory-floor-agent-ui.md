@@ -1,11 +1,11 @@
 ---
-status: ready-for-implementation
+status: first-slice-implemented
 size: large
 ---
 
 # Factory Floor Agent UI
 
-Status: Ready for a first stacked UI pass based on the meta-agent coordinator summary. The bedtime implementation should add an alternate factory-floor overview route that visualizes agents as stations and preserves direct access to real sessions. It should complement the current home/detail UI rather than replace it.
+Status: First shippable slice implemented. `/factory` is a read-only coordinator-summary overview linked from the home topbar, with supervisor counters and active/recent station grids. Still missing the richer controls from the original scope: forwarding, recovery/stop affordances, inspection lane, PR media, and complete visual state coverage.
 
 ## Goal
 
@@ -41,15 +41,16 @@ The first version does not need animation beyond restrained CSS states. It shoul
 
 ## Checklist
 
-- [ ] Audit the current session list/detail UI and the meta-agent summary endpoint for data needed by the factory overview.
-- [ ] Define the factory-floor information architecture: supervisor booth, active stations, recent stations, inspection/review lane, and detail affordances.
+- [x] Audit the current session list/detail UI and the meta-agent summary endpoint for data needed by the factory overview. _Used the existing `CoordinatorSummary` model and home coordinator panel in `client/app.ts` as the data contract._
+- [x] Define the factory-floor information architecture: supervisor booth, active stations, recent stations, inspection/review lane, and detail affordances. _First slice includes supervisor booth plus active/recent lanes; inspection/review remains a later lane._
 - [ ] Define visual state mapping for busy, idle, waiting-for-user, exited, errored, reviewing, stale, and recoverable sessions.
-- [ ] Build a first responsive `/factory` overview route that shows active and recent sessions as stations.
-- [ ] Preserve one-click access to the terminal/session detail for each station.
+- [x] Build a first responsive `/factory` overview route that shows active and recent sessions as stations. _Added `renderFactory` in `client/app.ts`, `/factory` homepage routing in `cli.ts`, and responsive factory CSS._
+- [x] Preserve one-click access to the terminal/session detail for each station. _Live stations render `Open` links to `/sessions/:id`; recent stations remain read-only in this slice._
 - [ ] Add compact controls for opening, recovering/resuming when available, stopping live sessions when appropriate, and sending a prompt through the coordinator flow when available.
-- [ ] Integrate task/branch/PR/status summary data when available, without blocking the first UI on perfect metadata.
-- [ ] Add mobile layout behavior that keeps the overview scannable and makes station controls touch-friendly.
-- [ ] Add Playwright coverage for the overview states and at least one screenshot artifact for PR review.
+- [x] Integrate task/branch/PR/status summary data when available, without blocking the first UI on perfect metadata. _Stations show current task, provider, branch, cwd, status, freshness, and confidence with empty fallback text._
+- [x] Add mobile layout behavior that keeps the overview scannable and makes station controls touch-friendly. _Factory lanes collapse to one column under tablet/mobile breakpoints and the spec checks no horizontal document scroll._
+- [x] Add Playwright coverage for the overview states. _Added a mocked coordinator-summary Playwright spec covering busy, idle, recent stations, live `Open` links, and mobile no-horizontal-scroll behavior._
+- [ ] Add at least one screenshot artifact for PR review.
 
 ## Open Questions
 
@@ -63,3 +64,4 @@ The first version does not need animation beyond restrained CSS states. It shoul
 
 - 2026-05-13: Captured task after reviewing Isomux's published feature list and reframing the desired UI as a factory-floor operations view for TUI UI.
 - 2026-05-13: Bedtime scope set as a stacked branch on the meta-agent coordinator summary endpoint, adding a `/factory` route rather than replacing the existing home screen.
+- 2026-05-13: Narrowed per user direction to a read-only first slice: `/factory` route, home topbar link, supervisor counters, active/recent station grid, live `Open` links, and one mocked Playwright spec.

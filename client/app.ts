@@ -408,6 +408,11 @@ async function renderRoute() {
     return;
   }
 
+  if (location.pathname === "/factory") {
+    await renderFactory();
+    return;
+  }
+
   await renderHome();
 }
 
@@ -446,6 +451,183 @@ async function fetchSessionRecovery(sessionId: string) {
   }
 }
 
+async function renderFactory() {
+  const [cwd, coordinatorSummary] = await Promise.all([
+    api<{ cwd: string; homeDir?: string; homeDirs?: string[] }>("/api/cwd"),
+    api<CoordinatorSummary>("/api/coordinator/summary"),
+  ]);
+  const displayHomeDirs = homeDirsForDisplay(cwd);
+  const liveAgents = coordinatorSummary.agents.filter((agent) => agent.kind === "live");
+  const recentAgents = coordinatorSummary.agents.filter((agent) => agent.kind === "recent");
+  recordCoordinatorObservation(coordinatorSummary);
+  document.title = "Factory floor · TUI UI";
+
+  app.innerHTML = `
+    <main class="layout factory-layout" data-testid="factory-floor">
+      <header class="topbar factory-topbar">
+        <a class="brand" href="/">tuiui</a>
+        ${renderTopNav("factory")}
+        <span class="muted" data-testid="factory-counts">${coordinatorSummary.counts.live} live · ${coordinatorSummary.counts.recent} recent</span>
+      </header>
+      <section class="factory-supervisor" data-testid="factory-supervisor" aria-label="Supervisor booth">
+        <div>
+          <span class="factory-kicker">Supervisor booth</span>
+          <strong>Factory floor</strong>
+          <p>${escapeHtml(primaryFactoryObservation(coordinatorSummary))}</p>
+        </div>
+        <div class="factory-meters" aria-label="Factory counters">
+          ${renderFactoryMeter("Live", coordinatorSummary.counts.live)}
+          ${renderFactoryMeter("Busy", coordinatorSummary.counts.busy)}
+          ${renderFactoryMeter("Idle", coordinatorSummary.counts.idle)}
+          ${renderFactoryMeter("Recent", coordinatorSummary.counts.recent)}
+        </div>
+      </section>
+      <section class="factory-sections" aria-label="Factory stations">
+        ${renderFactoryLane({
+          title: "Active Stations",
+          subtitle: `${liveAgents.length} live sessions`,
+          agents: liveAgents,
+          homeDirs: displayHomeDirs,
+          empty: "No live agents on the floor.",
+        })}
+        ${renderFactoryLane({
+          title: "Recent Stations",
+          subtitle: `${recentAgents.length} provider-history sessions`,
+          agents: recentAgents,
+          homeDirs: displayHomeDirs,
+          empty: "No recent provider sessions found.",
+        })}
+      </section>
+    </main>
+  `;
+}
+
+function renderTopNav(current: "home" | "factory") {
+  return `
+    <nav class="topnav" aria-label="Primary">
+      <a href="/" ${current === "home" ? `aria-current="page"` : ""}>Home</a>
+      <a href="/factory" ${current === "factory" ? `aria-current="page"` : ""}>Factory</a>
+    </nav>
+  `;
+}
+
+function primaryFactoryObservation(summary: CoordinatorSummary) {
+  return summary.observations[0]?.text || `${summary.counts.agents} agent sessions observed.`;
+}
+
+function renderFactoryMeter(label: string, value: number) {
+  return `
+    <span class="factory-meter">
+      <strong>${escapeHtml(String(value))}</strong>
+      <span>${escapeHtml(label)}</span>
+    </span>
+  `;
+}
+
+function renderFactoryLane(input: {
+  title: string;
+  subtitle: string;
+  agents: CoordinatorAgentSummary[];
+  homeDirs: string[];
+  empty: string;
+}) {
+  return `
+    <section class="factory-lane" aria-label="${escapeAttr(input.title)}">
+      <header>
+        <strong>${escapeHtml(input.title)}</strong>
+        <span>${escapeHtml(input.subtitle)}</span>
+      </header>
+      <div class="factory-station-grid">
+        ${input.agents.length ? input.agents.map((agent) => renderFactoryStation(agent, input.homeDirs)).join("") : `<p class="empty">${escapeHtml(input.empty)}</p>`}
+      </div>
+    </section>
+  `;
+}
+
+function renderFactoryStation(agent: CoordinatorAgentSummary, homeDirs: string[]) {
+  const state = factoryStationState(agent);
+  const title = agent.title || agent.command || agent.providerSessionId || agent.id;
+  const task = agent.currentTask || agent.latestUserText || agent.latestAssistantText || "No task caption available.";
+  const meta = [
+    coordinatorProviderLabel(agent.provider),
+    agent.branch || "branch unknown",
+    formatPathForDisplay(agent.cwd, homeDirs),
+  ].filter(Boolean).join(" · ");
+  return `
+    <article
+      class="factory-station"
+      data-testid="factory-station"
+      data-kind="${escapeAttr(agent.kind)}"
+      data-state="${escapeAttr(state)}"
+      data-freshness="${escapeAttr(agent.freshness.level)}"
+    >
+      <header>
+        <span class="factory-status-light" data-state="${escapeAttr(state)}" aria-label="${escapeAttr(state)}"></span>
+        <div>
+          <strong title="${escapeAttr(title)}">${escapeHtml(title)}</strong>
+          <span>${escapeHtml(agent.kind)} · ${escapeHtml(agent.lifecycle)}</span>
+        </div>
+        <span class="factory-provider">${escapeHtml(coordinatorProviderLabel(agent.provider))}</span>
+      </header>
+      <p>${escapeHtml(task)}</p>
+      <dl class="factory-station-facts">
+        <div>
+          <dt>Status</dt>
+          <dd>${escapeHtml(agent.status)}</dd>
+        </div>
+        <div>
+          <dt>Freshness</dt>
+          <dd>${escapeHtml(factoryFreshnessLabel(agent))}</dd>
+        </div>
+        <div>
+          <dt>Confidence</dt>
+          <dd>${escapeHtml(agent.confidence.label)}</dd>
+        </div>
+      </dl>
+      <footer>
+        <code title="${escapeAttr(meta)}">${escapeHtml(meta)}</code>
+        ${agent.kind === "live" ? `<a class="secondary-button factory-open-button" href="/sessions/${escapeAttr(agent.id)}">Open</a>` : ""}
+      </footer>
+    </article>
+  `;
+}
+
+function factoryStationState(agent: CoordinatorAgentSummary) {
+  if (agent.lifecycle === "exited" || agent.status === "exited") {
+    return "exited";
+  }
+  if (agent.status === "busy") {
+    return "busy";
+  }
+  if (agent.kind === "recent") {
+    return "recent";
+  }
+  return "idle";
+}
+
+function factoryFreshnessLabel(agent: CoordinatorAgentSummary) {
+  if (!agent.freshness || agent.freshness.ageMs === null) {
+    return "unknown";
+  }
+  return `${agent.freshness.level} · ${formatDuration(agent.freshness.ageMs)}`;
+}
+
+function formatDuration(ms: number) {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) {
+    return `${hours}h`;
+  }
+  return `${Math.round(hours / 24)}d`;
+}
+
 async function renderHome() {
   const [cwd, sessions, commands, recentAgentSessions, coordinatorSummary] = await Promise.all([
     api<{ cwd: string; homeDir?: string; homeDirs?: string[] }>("/api/cwd"),
@@ -466,6 +648,7 @@ async function renderHome() {
     <main class="layout home-layout">
       <header class="topbar">
         <a class="brand" href="/">tuiui</a>
+        ${renderTopNav("home")}
         <span class="muted" data-testid="session-count">${sessions.length} sessions</span>
       </header>
       <section class="launcher" aria-label="Launch session">
