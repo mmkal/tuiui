@@ -598,7 +598,9 @@ test("push-to-talk sends a transcript and reads back the idle result without a r
     (window as any).__voiceEmit("what is one plus two");
   });
 
-  await expect(page.getByTestId("stdin-log")).toContainText("what is one plus two");
+  await expect.poll(async () => {
+    return (await fetchSessionPayload(page)).stdinEvents.at(-1)?.text;
+  }).toBe("what is one plus two");
   await expect(page.getByTestId("rendered-terminal")).toContainText("three");
   await expect.poll(async () => {
     return await page.evaluate(() => (window as any).__voiceSpoken);
@@ -776,6 +778,23 @@ test("keeps mobile session chrome compact without document scrolling", async ({ 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(ctx.baseUrl);
 
+  const homeInputs = await page.evaluate(() => {
+    const commandInput = document.querySelector<HTMLInputElement>("input[name='commandLine']")!;
+    const cwdInput = document.querySelector<HTMLInputElement>("input[name='cwd']")!;
+    return {
+      commandFontSize: getComputedStyle(commandInput).fontSize,
+      cwdFontSize: getComputedStyle(cwdInput).fontSize,
+      commandTouchAction: getComputedStyle(commandInput).touchAction,
+      cwdTouchAction: getComputedStyle(cwdInput).touchAction,
+    };
+  });
+  expect(homeInputs).toMatchObject({
+    commandFontSize: "16px",
+    cwdFontSize: "16px",
+    commandTouchAction: "manipulation",
+    cwdTouchAction: "manipulation",
+  });
+
   await page.getByRole("textbox", { name: "Command" }).fill("scrollback-agent");
   await page.getByRole("textbox", { name: "Command" }).press("Enter");
   await expect(page.getByTestId("rendered-terminal")).toContainText("scrollback line 80");
@@ -927,6 +946,29 @@ test("keeps mobile session chrome compact without document scrolling", async ({ 
   await clickSessionMenuButton(page, "Relayout");
   await expect(page.getByTestId("terminal-redraw-overlay")).toBeVisible();
   await expect(page.locator(".menu-fact code")).toHaveText(fs.realpathSync(ctx.workspaceDir));
+});
+
+test("archives a session from the hamburger menu and hides it from Home", async ({ page, ctx }) => {
+  await launchFakeCodex(page, ctx);
+  const sessionId = (await fetchSessionPayload(page)).id;
+
+  await openSessionMenu(page);
+  await page.getByRole("button", { name: "Archive" }).click();
+
+  await expect(page).toHaveURL(ctx.baseUrl + "/");
+  await expect(page.getByTestId("session-count")).toHaveText("0 sessions");
+  await expect(page.locator(".sessions")).toContainText("No sessions");
+  await expect.poll(async () => {
+    return await page.evaluate(async () => await fetch("/api/sessions").then((response) => response.json()));
+  }).toEqual([]);
+  const archivedSession = await page.evaluate(async (id) => {
+    const response = await fetch(`/api/sessions/${id}`);
+    return { status: response.status, body: await response.json().catch(() => null) };
+  }, sessionId);
+  expect(archivedSession).toMatchObject({
+    status: 404,
+    body: { error: "Session not found" },
+  });
 });
 
 test("can pause and resume live session events", async ({ page, ctx }) => {

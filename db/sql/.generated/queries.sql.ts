@@ -5,7 +5,8 @@ select
   sessions.id,
   sessions.cwd,
   sessions.launch_command,
-  sessions.created_at_ms
+  sessions.created_at_ms,
+  sessions.archived_at_ms
 from sessions
 where sessions.id = ?
 limit 1;
@@ -33,6 +34,7 @@ export namespace getSession {
 		cwd: string;
 		launch_command: string;
 		created_at_ms: number;
+		archived_at_ms?: number;
 	};
 }
 
@@ -139,5 +141,32 @@ export namespace setSessionRecovery {
 		sessionId: string;
 		recoveryCommand: string;
 		createdAtMs: number;
+	};
+}
+
+const archiveSessionSql = `
+update sessions
+set archived_at_ms = ?
+where id = ?;
+`.trim();
+const archiveSessionQuery = (data: archiveSession.Data, params: archiveSession.Params) => ({
+	name: "archiveSession",
+	sql: archiveSessionSql,
+	args: [data.archivedAtMs, params.sessionId],
+});
+
+export const archiveSession = Object.assign(
+	function archiveSession(client: SyncClient, data: archiveSession.Data, params: archiveSession.Params) {
+		return client.run(archiveSessionQuery(data, params));
+	},
+	{ sql: archiveSessionSql, query: archiveSessionQuery },
+);
+
+export namespace archiveSession {
+	export type Data = {
+		archivedAtMs: number | null;
+	};
+	export type Params = {
+		sessionId: string;
 	};
 }

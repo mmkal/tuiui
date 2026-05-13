@@ -33,6 +33,33 @@ test("records sessions and later attaches a recovery command", () => {
   });
 });
 
+test("archives stored sessions without deleting their recovery metadata", () => {
+  using store = createSessionStore(":memory:");
+
+  store.recordSession({
+    id: "tuiui_archived_session",
+    cwd: "/tmp/tuiui-store",
+    launchCommand: "codex",
+    createdAtMs: 1_000,
+  });
+  store.setSessionRecovery({
+    sessionId: "tuiui_archived_session",
+    recoveryCommand: "codex resume archived-thread",
+    createdAtMs: 2_000,
+  });
+
+  store.archiveSession({
+    sessionId: "tuiui_archived_session",
+    archivedAtMs: 3_000,
+  });
+
+  expect(store.getSession("tuiui_archived_session")).toMatchObject({
+    archivedAtMs: 3_000,
+    recoveryCommand: "codex resume archived-thread",
+    recoveryCreatedAtMs: 2_000,
+  });
+});
+
 test("formats recovery commands so they can be parsed again", () => {
   const commandLine = formatCommandLine("codex", ["resume", "thread with spaces"]);
 
