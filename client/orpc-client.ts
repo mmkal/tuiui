@@ -14,6 +14,10 @@ type OrpcJsonResult<T> =
   | { handled: false };
 
 export async function callOrpcJsonApi<T>(path: string, init: RequestInit = {}): Promise<OrpcJsonResult<T>> {
+  if ((globalThis as { __tuiuiForceLegacyApi?: boolean }).__tuiuiForceLegacyApi) {
+    return { handled: false };
+  }
+
   const method = String(init.method || "GET").toUpperCase();
   const url = new URL(path, location.origin);
 
