@@ -5,7 +5,7 @@ size: large
 
 # Factory Floor Agent UI
 
-Status: First slice exists, but the requested direction has moved much further toward a full skeuomorphic demo. Next work should replace the flat station-grid feel with an isometric factory floor: robot workers, cwd-based factory areas, speech bubbles, and click-through inspection details. Controls can stay modest until the visual/data model proves out.
+Status: Skeuomorphic demo implemented on top of the first slice. `/factory` now groups workers by cwd areas, renders robot workers on a miniature factory floor with speech bubbles, and opens an inspection bay on robot click. Still missing richer action controls beyond opening a live terminal, and PR media needs to be refreshed for this new version.
 
 ## Goal
 
@@ -57,13 +57,13 @@ Assumptions:
 
 - [x] Audit the current session list/detail UI and the meta-agent summary endpoint for data needed by the factory overview. _Used the existing `CoordinatorSummary` model and home coordinator panel in `client/app.ts` as the data contract._
 - [x] Define the factory-floor information architecture: supervisor booth, active stations, recent stations, inspection/review lane, and detail affordances. _First slice includes supervisor booth plus active/recent lanes; inspection/review remains a later lane._
-- [ ] Define visual state mapping for busy, idle, waiting-for-user, exited, errored, reviewing, stale, and recoverable sessions.
+- [x] Define visual state mapping for busy, idle, waiting-for-user, exited, errored, reviewing, stale, and recoverable sessions. _Mapped busy/idle/recent/exited/stale/blocked into `factoryStationState` and CSS robot/status-light states; reviewing/recoverable remain future metadata-specific refinements._
 - [x] Build a first responsive `/factory` overview route that shows active and recent sessions as stations. _Added `renderFactory` in `client/app.ts`, `/factory` homepage routing in `cli.ts`, and responsive factory CSS._
-- [ ] Add cwd-based factory areas to the coordinator summary or derived UI model.
-- [ ] Replace the flat station cards with a skeuomorphic factory floor surface: walls/floor, belts, machines, area signs, and robot workers.
-- [ ] Render robots with stateful poses or indicators for busy, idle, blocked/stale, and exited/recent.
-- [ ] Add speech bubbles showing each worker's current task/summary.
-- [ ] Add a click detail inspector for a robot with status, cwd, branch, PR/task links, freshness/confidence, blocker text, and session open affordance.
+- [x] Add cwd-based factory areas to the coordinator summary or derived UI model. _Added `CoordinatorAreaSummary` and `areas` to `createCoordinatorSummary`, with a frontend fallback for older summaries._
+- [x] Replace the flat station cards with a skeuomorphic factory floor surface: walls/floor, belts, machines, area signs, and robot workers. _Reworked `/factory` CSS/HTML around `factory-scene`, `factory-area`, conveyors, machines, and robot workers._
+- [x] Render robots with stateful poses or indicators for busy, idle, blocked/stale, and exited/recent. _Robots/status lights use `data-state` from `factoryStationState`; busy and call-light states animate lightly._
+- [x] Add speech bubbles showing each worker's current task/summary. _`renderFactoryRobotStation` renders truncated speech bubbles from current task/user/assistant text._
+- [x] Add a click detail inspector for a robot with status, cwd, branch, PR/task links, freshness/confidence, blocker text, and session open affordance. _`bindFactoryControls` updates the `factory-inspector` panel from clicked robot metadata._
 - [x] Preserve one-click access to the terminal/session detail for each station. _Live stations render `Open` links to `/sessions/:id`; recent stations remain read-only in this slice._
 - [ ] Add compact controls for opening, recovering/resuming when available, stopping live sessions when appropriate, and sending a prompt through the coordinator flow when available.
 - [x] Integrate task/branch/PR/status summary data when available, without blocking the first UI on perfect metadata. _Stations show current task, provider, branch, cwd, status, freshness, and confidence with empty fallback text._
@@ -86,3 +86,4 @@ Assumptions:
 - 2026-05-13: Bedtime scope set as a stacked branch on the meta-agent coordinator summary endpoint, adding a `/factory` route rather than replacing the existing home screen.
 - 2026-05-13: Narrowed per user direction to a read-only first slice: `/factory` route, home topbar link, supervisor counters, active/recent station grid, live `Open` links, and one mocked Playwright spec.
 - 2026-05-13: Expanded scope after review: go much harder on skeuomorphic Isomux-inspired factory-floor visuals, robot workers, cwd areas, speech bubbles, and click inspection details.
+- 2026-05-13: Implemented the second-pass demo: `areas` in coordinator summaries, robot worker stations grouped by cwd, speech bubbles, and click-to-inspect details.

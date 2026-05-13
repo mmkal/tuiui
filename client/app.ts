@@ -17,7 +17,7 @@ import { parseCommandLine } from "../src/command-line.ts";
 import { stringify as stringifyYaml } from "yaml";
 import { attachmentUploadName, dedupeClipboardImageFiles, type AttachmentSource } from "./attachments.ts";
 import { showToast } from "./toast.ts";
-import type { CoordinatorAgentSummary, CoordinatorSummary } from "../src/meta-agent-coordinator.ts";
+import type { CoordinatorAgentSummary, CoordinatorAreaSummary, CoordinatorSummary } from "../src/meta-agent-coordinator.ts";
 import {
   createBrowserVoiceRecognizer,
   createBrowserVoiceSpeaker,
@@ -64,6 +64,15 @@ type SessionRecoveryPayload = {
 
 type ClientConfig = {
   pageLoadToasts: boolean;
+};
+
+type FactoryAreaView = {
+  id: string;
+  cwd: string;
+  label: string;
+  displayCwd: string;
+  agents: CoordinatorAgentSummary[];
+  counts: CoordinatorAreaSummary["counts"];
 };
 
 type SessionSdkPayload = {
@@ -457,13 +466,12 @@ async function renderFactory() {
     api<CoordinatorSummary>("/api/coordinator/summary"),
   ]);
   const displayHomeDirs = homeDirsForDisplay(cwd);
-  const liveAgents = coordinatorSummary.agents.filter((agent) => agent.kind === "live");
-  const recentAgents = coordinatorSummary.agents.filter((agent) => agent.kind === "recent");
+  const factoryAreas = factoryAreaViews(coordinatorSummary, displayHomeDirs);
   recordCoordinatorObservation(coordinatorSummary);
   document.title = "Factory floor · TUI UI";
 
   app.innerHTML = `
-    <main class="layout factory-layout" data-testid="factory-floor">
+    <main class="layout factory-layout factory-immersive" data-testid="factory-floor">
       <header class="topbar factory-topbar">
         <a class="brand" href="/">tuiui</a>
         ${renderTopNav("factory")}
@@ -482,24 +490,25 @@ async function renderFactory() {
           ${renderFactoryMeter("Recent", coordinatorSummary.counts.recent)}
         </div>
       </section>
-      <section class="factory-sections" aria-label="Factory stations">
-        ${renderFactoryLane({
-          title: "Active Stations",
-          subtitle: `${liveAgents.length} live sessions`,
-          agents: liveAgents,
-          homeDirs: displayHomeDirs,
-          empty: "No live agents on the floor.",
-        })}
-        ${renderFactoryLane({
-          title: "Recent Stations",
-          subtitle: `${recentAgents.length} provider-history sessions`,
-          agents: recentAgents,
-          homeDirs: displayHomeDirs,
-          empty: "No recent provider sessions found.",
-        })}
+      <section class="factory-command-deck" aria-label="Factory command deck">
+        <section class="factory-scene" aria-label="Robot factory floor">
+          <div class="factory-back-wall" aria-hidden="true">
+            <span class="factory-window"><span></span><span></span><span></span><span></span></span>
+            <span class="factory-pipe factory-pipe-left"></span>
+            <span class="factory-pipe factory-pipe-right"></span>
+            <span class="factory-wall-gauge"></span>
+          </div>
+          <div class="factory-floor-plate">
+            ${factoryAreas.length ? factoryAreas.map((area, index) => renderFactoryArea(area, index)).join("") : renderEmptyFactoryFloor()}
+          </div>
+        </section>
+        <section class="factory-inspector" id="factory-inspector" data-testid="factory-inspector" aria-label="Inspection bay">
+          ${renderFactoryInspector(null, displayHomeDirs)}
+        </section>
       </section>
     </main>
   `;
+  bindFactoryControls(coordinatorSummary, displayHomeDirs);
 }
 
 function renderTopNav(current: "home" | "factory") {
@@ -524,77 +533,273 @@ function renderFactoryMeter(label: string, value: number) {
   `;
 }
 
-function renderFactoryLane(input: {
-  title: string;
-  subtitle: string;
-  agents: CoordinatorAgentSummary[];
-  homeDirs: string[];
-  empty: string;
-}) {
+function factoryAreaViews(summary: CoordinatorSummary, homeDirs: string[]): FactoryAreaView[] {
+  const agentsByStableId = new Map(summary.agents.map((agent) => [agent.stableId, agent]));
+  const suppliedAreas = Array.isArray((summary as any).areas) ? (summary as any).areas as CoordinatorAreaSummary[] : [];
+  const areaSummaries = suppliedAreas.length ? suppliedAreas : fallbackFactoryAreas(summary.agents);
+  return areaSummaries
+    .map((area) => {
+      const agents = area.agentIds
+        .map((agentId) => agentsByStableId.get(agentId) || summary.agents.find((agent) => agent.id === agentId))
+        .filter((agent): agent is CoordinatorAgentSummary => Boolean(agent));
+      return {
+        id: area.id,
+        cwd: area.cwd,
+        label: area.label || factoryAreaLabel(area.cwd),
+        displayCwd: formatPathForDisplay(area.cwd, homeDirs),
+        agents,
+        counts: area.counts,
+      };
+    })
+    .filter((area) => area.agents.length);
+}
+
+function fallbackFactoryAreas(agents: CoordinatorAgentSummary[]): CoordinatorAreaSummary[] {
+  const groups = new Map<string, CoordinatorAgentSummary[]>();
+  for (const agent of agents) {
+    const cwd = (agent.cwd || "/").replace(/\/+$/g, "") || "/";
+    groups.set(cwd, [...groups.get(cwd) || [], agent]);
+  }
+  return [...groups.entries()].map(([cwd, areaAgents]) => ({
+    id: `cwd:${factoryAreaLabel(cwd).toLowerCase().replace(/[^a-z0-9]+/g, "-") || "area"}`,
+    cwd,
+    label: factoryAreaLabel(cwd),
+    agentIds: areaAgents.map((agent) => agent.stableId),
+    counts: {
+      agents: areaAgents.length,
+      live: areaAgents.filter((agent) => agent.kind === "live").length,
+      recent: areaAgents.filter((agent) => agent.kind === "recent").length,
+      running: areaAgents.filter((agent) => agent.lifecycle === "running").length,
+      busy: areaAgents.filter((agent) => agent.status === "busy").length,
+      idle: areaAgents.filter((agent) => agent.status === "idle").length,
+      exited: areaAgents.filter((agent) => agent.status === "exited").length,
+      stale: areaAgents.filter((agent) => agent.freshness.level === "stale").length,
+      forwardable: areaAgents.filter((agent) => agent.forwardable).length,
+    },
+  }));
+}
+
+function factoryAreaLabel(cwd: string) {
+  if (!cwd || cwd === "/") {
+    return "/";
+  }
+  return cwd.split("/").filter(Boolean).at(-1) || cwd;
+}
+
+function renderFactoryArea(area: FactoryAreaView, index: number) {
+  const active = area.counts.busy || area.counts.running;
   return `
-    <section class="factory-lane" aria-label="${escapeAttr(input.title)}">
+    <section class="factory-area" data-testid="factory-area" data-area-index="${index}" data-area-id="${escapeAttr(area.id)}" aria-label="${escapeAttr(area.label)} work area">
       <header>
-        <strong>${escapeHtml(input.title)}</strong>
-        <span>${escapeHtml(input.subtitle)}</span>
+        <div>
+          <span class="factory-kicker">Area ${index + 1}</span>
+          <strong>${escapeHtml(area.label)}</strong>
+          <code>${escapeHtml(area.displayCwd)}</code>
+        </div>
+        <dl>
+          <div><dt>robots</dt><dd>${area.counts.agents}</dd></div>
+          <div><dt>active</dt><dd>${active}</dd></div>
+          <div><dt>recent</dt><dd>${area.counts.recent}</dd></div>
+        </dl>
       </header>
-      <div class="factory-station-grid">
-        ${input.agents.length ? input.agents.map((agent) => renderFactoryStation(agent, input.homeDirs)).join("") : `<p class="empty">${escapeHtml(input.empty)}</p>`}
+      <div class="factory-area-line" aria-label="${escapeAttr(area.label)} robots">
+        <span class="factory-conveyor" aria-hidden="true"></span>
+        ${area.agents.map((agent, agentIndex) => renderFactoryRobotStation(agent, agentIndex)).join("")}
       </div>
     </section>
   `;
 }
 
-function renderFactoryStation(agent: CoordinatorAgentSummary, homeDirs: string[]) {
+function renderEmptyFactoryFloor() {
+  return `
+    <section class="factory-area factory-area-empty" aria-label="Empty factory floor">
+      <header>
+        <div>
+          <span class="factory-kicker">Standby</span>
+          <strong>No robots online</strong>
+          <code>/</code>
+        </div>
+      </header>
+      <div class="factory-area-line">
+        <p class="empty">No agent sessions found.</p>
+      </div>
+    </section>
+  `;
+}
+
+function renderFactoryRobotStation(agent: CoordinatorAgentSummary, index: number) {
   const state = factoryStationState(agent);
   const title = agent.title || agent.command || agent.providerSessionId || agent.id;
   const task = agent.currentTask || agent.latestUserText || agent.latestAssistantText || "No task caption available.";
-  const meta = [
-    coordinatorProviderLabel(agent.provider),
-    agent.branch || "branch unknown",
-    formatPathForDisplay(agent.cwd, homeDirs),
-  ].filter(Boolean).join(" · ");
+  const bubble = compactFactorySpeech(task);
   return `
-    <article
-      class="factory-station"
+    <button
+      type="button"
+      class="factory-robot-station"
       data-testid="factory-station"
+      data-factory-agent-id="${escapeAttr(agent.stableId)}"
       data-kind="${escapeAttr(agent.kind)}"
       data-state="${escapeAttr(state)}"
       data-freshness="${escapeAttr(agent.freshness.level)}"
+      style="--robot-offset: ${index % 3};"
+      aria-label="${escapeAttr(`${title}: ${task}`)}"
     >
-      <header>
-        <span class="factory-status-light" data-state="${escapeAttr(state)}" aria-label="${escapeAttr(state)}"></span>
-        <div>
-          <strong title="${escapeAttr(title)}">${escapeHtml(title)}</strong>
-          <span>${escapeHtml(agent.kind)} · ${escapeHtml(agent.lifecycle)}</span>
-        </div>
-        <span class="factory-provider">${escapeHtml(coordinatorProviderLabel(agent.provider))}</span>
-      </header>
-      <p>${escapeHtml(task)}</p>
-      <dl class="factory-station-facts">
-        <div>
-          <dt>Status</dt>
-          <dd>${escapeHtml(agent.status)}</dd>
-        </div>
-        <div>
-          <dt>Freshness</dt>
-          <dd>${escapeHtml(factoryFreshnessLabel(agent))}</dd>
-        </div>
-        <div>
-          <dt>Confidence</dt>
-          <dd>${escapeHtml(agent.confidence.label)}</dd>
-        </div>
-      </dl>
-      <footer>
-        <code title="${escapeAttr(meta)}">${escapeHtml(meta)}</code>
-        ${agent.kind === "live" ? `<a class="secondary-button factory-open-button" href="/sessions/${escapeAttr(agent.id)}">Open</a>` : ""}
-      </footer>
-    </article>
+      <span class="factory-speech" title="${escapeAttr(task)}">${escapeHtml(bubble)}</span>
+      <span class="factory-machine" aria-hidden="true">
+        <span class="factory-monitor"></span>
+        <span class="factory-keyboard"></span>
+        <span class="factory-crate"></span>
+      </span>
+      ${renderFactoryRobot(agent, state)}
+      <span class="factory-worker-tag">
+        <span class="factory-status-light" data-state="${escapeAttr(state)}"></span>
+        <strong title="${escapeAttr(title)}">${escapeHtml(title)}</strong>
+        <span>${escapeHtml(coordinatorProviderLabel(agent.provider))} · ${escapeHtml(agent.kind)}</span>
+      </span>
+    </button>
+  `;
+}
+
+function renderFactoryRobot(agent: CoordinatorAgentSummary, state: string) {
+  const tint = robotTint(agent);
+  return `
+    <span class="factory-robot" data-state="${escapeAttr(state)}" style="--robot-tint: ${escapeAttr(tint)};" aria-hidden="true">
+      <span class="robot-antenna"></span>
+      <span class="robot-head">
+        <span class="robot-eye robot-eye-left"></span>
+        <span class="robot-eye robot-eye-right"></span>
+        <span class="robot-mouth"></span>
+      </span>
+      <span class="robot-neck"></span>
+      <span class="robot-body">
+        <span class="robot-panel"></span>
+      </span>
+      <span class="robot-arm robot-arm-left"></span>
+      <span class="robot-arm robot-arm-right"></span>
+      <span class="robot-leg robot-leg-left"></span>
+      <span class="robot-leg robot-leg-right"></span>
+    </span>
+  `;
+}
+
+function robotTint(agent: CoordinatorAgentSummary) {
+  if (agent.provider === "claude") {
+    return "#d89a5b";
+  }
+  if (agent.provider === "opencode") {
+    return "#78b7ff";
+  }
+  if (agent.provider === "codex") {
+    return "#8fdc9b";
+  }
+  return "#c9d2dd";
+}
+
+function compactFactorySpeech(value: string) {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (compact.length <= 118) {
+    return compact;
+  }
+  return `${compact.slice(0, 115).trimEnd()}...`;
+}
+
+function bindFactoryControls(summary: CoordinatorSummary, homeDirs: string[]) {
+  const inspector = document.getElementById("factory-inspector");
+  if (!inspector) {
+    return;
+  }
+  const buttons = [...document.querySelectorAll<HTMLButtonElement>("[data-factory-agent-id]")];
+  for (const button of buttons) {
+    button.addEventListener("click", () => {
+      const agent = findFactoryAgent(summary, button.dataset.factoryAgentId || "");
+      if (!agent) {
+        return;
+      }
+      for (const candidate of buttons) {
+        candidate.setAttribute("aria-selected", String(candidate === button));
+      }
+      inspector.innerHTML = renderFactoryInspector(agent, homeDirs);
+    });
+  }
+}
+
+function findFactoryAgent(summary: CoordinatorSummary, agentId: string) {
+  return summary.agents.find((agent) => agent.stableId === agentId || agent.id === agentId || agent.providerSessionId === agentId) || null;
+}
+
+function renderFactoryInspector(agent: CoordinatorAgentSummary | null, homeDirs: string[]) {
+  if (!agent) {
+    return `
+      <div class="factory-inspector-empty">
+        <span class="factory-kicker">Inspection bay</span>
+        <strong>Robot manifest</strong>
+        <p>No worker selected.</p>
+      </div>
+    `;
+  }
+  const title = agent.title || agent.command || agent.providerSessionId || agent.id;
+  const task = agent.currentTask || agent.latestUserText || agent.latestAssistantText || "No task caption available.";
+  const state = factoryStationState(agent);
+  return `
+    <div class="factory-inspector-header" data-state="${escapeAttr(state)}">
+      <span class="factory-status-light" data-state="${escapeAttr(state)}"></span>
+      <div>
+        <span class="factory-kicker">Inspection bay</span>
+        <strong>${escapeHtml(title)}</strong>
+        <p>${escapeHtml(coordinatorProviderLabel(agent.provider))} · ${escapeHtml(agent.kind)} · ${escapeHtml(agent.lifecycle)}</p>
+      </div>
+    </div>
+    <blockquote>${escapeHtml(task)}</blockquote>
+    ${renderFactoryBlockers(agent)}
+    <dl class="factory-inspector-facts">
+      <div><dt>Status</dt><dd>${escapeHtml(agent.status)}</dd></div>
+      <div><dt>Freshness</dt><dd>${escapeHtml(factoryFreshnessLabel(agent))}</dd></div>
+      <div><dt>Confidence</dt><dd>${escapeHtml(agent.confidence.label)}</dd></div>
+      <div><dt>CWD</dt><dd><code>${escapeHtml(formatPathForDisplay(agent.cwd, homeDirs))}</code></dd></div>
+      <div><dt>Branch</dt><dd><code>${escapeHtml(agent.branch || "branch unknown")}</code></dd></div>
+      <div><dt>Worktree</dt><dd><code>${escapeHtml(agent.worktree || "worktree unknown")}</code></dd></div>
+    </dl>
+    ${renderFactoryInspectorLinks(agent)}
+  `;
+}
+
+function renderFactoryBlockers(agent: CoordinatorAgentSummary) {
+  const blockers = [...agent.blockers, ...agent.pendingUserDecisions];
+  if (!blockers.length) {
+    return "";
+  }
+  return `
+    <div class="factory-blockers" data-testid="factory-blockers">
+      <strong>Call light</strong>
+      <ul>
+        ${blockers.map((blocker) => `<li>${escapeHtml(blocker)}</li>`).join("")}
+      </ul>
+    </div>
+  `;
+}
+
+function renderFactoryInspectorLinks(agent: CoordinatorAgentSummary) {
+  const links = [
+    ...agent.prLinks.map((link) => `<span>${escapeHtml(link)}</span>`),
+    ...agent.taskFiles.map((taskFile) => `<code>${escapeHtml(taskFile)}</code>`),
+  ].join("");
+  return `
+    <div class="factory-inspector-actions">
+      ${agent.kind === "live" ? `<a class="secondary-button factory-open-button" href="/sessions/${escapeAttr(agent.id)}">Open terminal</a>` : ""}
+      ${links ? `<div class="factory-reference-strip">${links}</div>` : ""}
+    </div>
   `;
 }
 
 function factoryStationState(agent: CoordinatorAgentSummary) {
   if (agent.lifecycle === "exited" || agent.status === "exited") {
     return "exited";
+  }
+  if (agent.blockers.length || agent.pendingUserDecisions.length) {
+    return "blocked";
+  }
+  if (agent.freshness.level === "stale") {
+    return "stale";
   }
   if (agent.status === "busy") {
     return "busy";

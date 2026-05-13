@@ -108,6 +108,24 @@ export type CoordinatorObservation = {
   createdAt: string;
 };
 
+export type CoordinatorAreaSummary = {
+  id: string;
+  cwd: string;
+  label: string;
+  agentIds: string[];
+  counts: {
+    agents: number;
+    live: number;
+    recent: number;
+    running: number;
+    busy: number;
+    idle: number;
+    exited: number;
+    stale: number;
+    forwardable: number;
+  };
+};
+
 export type CoordinatorSummary = {
   format: "tuiui.coordinatorSummary.v1";
   generatedAt: string;
@@ -122,6 +140,7 @@ export type CoordinatorSummary = {
     stale: number;
     forwardable: number;
   };
+  areas: CoordinatorAreaSummary[];
   agents: CoordinatorAgentSummary[];
   authority: {
     deterministic: true;
@@ -169,11 +188,13 @@ export function createCoordinatorSummary(input: {
     stale: agents.filter((agent) => agent.freshness.level === "stale").length,
     forwardable: agents.filter((agent) => agent.forwardable).length,
   };
+  const areas = createCoordinatorAreas(agents);
 
   return {
     format: "tuiui.coordinatorSummary.v1",
     generatedAt,
     counts,
+    areas,
     agents,
     authority: {
       deterministic: true,
@@ -187,6 +208,61 @@ export function createCoordinatorSummary(input: {
     },
     observations: createObservations(agents, counts, generatedAt),
   };
+}
+
+function createCoordinatorAreas(agents: CoordinatorAgentSummary[]): CoordinatorAreaSummary[] {
+  const groups = new Map<string, CoordinatorAgentSummary[]>();
+  for (const agent of agents) {
+    const cwd = normalizeAreaCwd(agent.cwd);
+    groups.set(cwd, [...groups.get(cwd) || [], agent]);
+  }
+  return [...groups.entries()]
+    .map(([cwd, areaAgents]) => {
+      const sortedAgents = [...areaAgents].sort(compareAgentsByActivity);
+      return {
+        id: `cwd:${stableSlug(cwd)}`,
+        cwd,
+        label: areaLabel(cwd),
+        agentIds: sortedAgents.map((agent) => agent.stableId),
+        counts: {
+          agents: sortedAgents.length,
+          live: sortedAgents.filter((agent) => agent.kind === "live").length,
+          recent: sortedAgents.filter((agent) => agent.kind === "recent").length,
+          running: sortedAgents.filter((agent) => agent.lifecycle === "running").length,
+          busy: sortedAgents.filter((agent) => agent.status === "busy").length,
+          idle: sortedAgents.filter((agent) => agent.status === "idle").length,
+          exited: sortedAgents.filter((agent) => agent.status === "exited").length,
+          stale: sortedAgents.filter((agent) => agent.freshness.level === "stale").length,
+          forwardable: sortedAgents.filter((agent) => agent.forwardable).length,
+        },
+      };
+    })
+    .sort((left, right) => right.counts.live - left.counts.live || right.counts.agents - left.counts.agents || left.label.localeCompare(right.label));
+}
+
+function normalizeAreaCwd(cwd: string) {
+  const trimmed = cwd.trim().replace(/\/+$/g, "");
+  return trimmed || "/";
+}
+
+function areaLabel(cwd: string) {
+  if (cwd === "/") {
+    return "/";
+  }
+  return cwd.split("/").filter(Boolean).at(-1) || cwd;
+}
+
+function stableSlug(value: string) {
+  let hash = 5381;
+  for (let index = 0; index < value.length; index++) {
+    hash = ((hash << 5) + hash) ^ value.charCodeAt(index);
+  }
+  const readable = value
+    .replace(/^\/+|\/+$/g, "")
+    .split("/")
+    .filter(Boolean)
+    .at(-1) || "root";
+  return `${readable.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "area"}-${(hash >>> 0).toString(36)}`;
 }
 
 export function resolveCoordinatorTarget(

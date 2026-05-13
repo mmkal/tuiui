@@ -56,6 +56,17 @@ test("summarizes live agents with freshness, confidence, task metadata, and auth
       messageCount: 2,
     },
   });
+  expect(summary.areas).toMatchObject([{
+    cwd: "/repo",
+    label: "repo",
+    agentIds: ["live:tuiui_live"],
+    counts: {
+      agents: 1,
+      live: 1,
+      running: 1,
+      forwardable: 1,
+    },
+  }]);
 });
 
 test("keeps recent provider sessions provider-neutral and dedupes provider history already represented by a live session", () => {

@@ -494,7 +494,7 @@ test("renders a coordinator summary and forwards prompts only after confirmation
   expect((await fetchSessionPayloadById(page, second.id)).stdinEvents).toHaveLength(0);
 });
 
-test("renders a factory floor station grid from the coordinator summary", async ({ page, ctx }) => {
+test("renders a skeuomorphic factory floor from the coordinator summary", async ({ page, ctx }) => {
   await page.route("**/api/coordinator/summary", async (route) => {
     await route.fulfill({
       status: 200,
@@ -512,21 +512,28 @@ test("renders a factory floor station grid from the coordinator summary", async 
   await expect(page.getByTestId("factory-supervisor")).toContainText("2 live sessions");
   await expect(page.getByTestId("factory-counts")).toHaveText("2 live · 1 recent");
   await expect(page.getByTestId("factory-station")).toHaveCount(3);
+  await expect(page.getByTestId("factory-area")).toHaveCount(2);
 
-  const busyStation = page.locator(".factory-station[data-state='busy']");
+  const busyStation = page.locator(".factory-robot-station[data-state='busy']");
   await expect(busyStation).toContainText("busy build agent");
   await expect(busyStation).toContainText("Implementing the factory station renderer.");
-  await expect(busyStation.getByRole("link", { name: "Open" })).toHaveAttribute("href", "/sessions/live-busy");
 
-  const idleStation = page.locator(".factory-station[data-state='idle']");
+  await busyStation.click();
+  await expect(page.getByTestId("factory-inspector")).toContainText("busy build agent");
+  await expect(page.getByTestId("factory-inspector")).toContainText("Implementing the factory station renderer.");
+  await expect(page.getByTestId("factory-inspector").getByRole("link", { name: "Open terminal" })).toHaveAttribute("href", "/sessions/live-busy");
+  await expect(page.getByTestId("factory-inspector")).toContainText("tasks/factory-floor-agent-ui.md");
+
+  const idleStation = page.locator(".factory-robot-station[data-state='idle']");
   await expect(idleStation).toContainText("idle review agent");
   await expect(idleStation).toContainText("Ready for inspection.");
-  await expect(idleStation.getByRole("link", { name: "Open" })).toHaveAttribute("href", "/sessions/live-idle");
 
-  const recentStation = page.locator(".factory-station[data-state='recent']");
+  const recentStation = page.locator(".factory-robot-station[data-state='recent']");
   await expect(recentStation).toContainText("recent codex thread");
   await expect(recentStation).toContainText("Polished the earlier station sketch.");
-  await expect(recentStation.getByRole("link", { name: "Open" })).toHaveCount(0);
+  await recentStation.click();
+  await expect(page.getByTestId("factory-inspector")).toContainText("recent codex thread");
+  await expect(page.getByTestId("factory-inspector").getByRole("link", { name: "Open terminal" })).toHaveCount(0);
 
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByTestId("factory-floor")).toBeVisible();
@@ -1306,6 +1313,40 @@ function createTempDirectoryAsDatabasePath(prefix: string) {
 function factoryCoordinatorSummary(workspaceDir: string) {
   const generatedAt = "2026-05-13T12:00:00.000Z";
   const longFactoryToken = `artifact-${"x".repeat(180)}`;
+  const agents = [
+    factoryCoordinatorAgent({
+      id: "live-busy",
+      kind: "live",
+      provider: "codex",
+      title: "busy build agent",
+      status: "busy",
+      lifecycle: "running",
+      currentTask: `Implementing the factory station renderer. ${longFactoryToken}`,
+      cwd: path.join(workspaceDir, longFactoryToken),
+    }),
+    factoryCoordinatorAgent({
+      id: "live-idle",
+      kind: "live",
+      provider: "claude",
+      title: "idle review agent",
+      status: "idle",
+      lifecycle: "running",
+      currentTask: "Ready for inspection.",
+      cwd: workspaceDir,
+    }),
+    factoryCoordinatorAgent({
+      id: "recent:codex:recent-thread",
+      kind: "recent",
+      provider: "codex",
+      providerSessionId: "recent-thread",
+      title: "recent codex thread",
+      status: "idle",
+      lifecycle: "recent",
+      currentTask: "Polished the earlier station sketch.",
+      cwd: workspaceDir,
+      forwardable: false,
+    }),
+  ];
   return {
     format: "tuiui.coordinatorSummary.v1",
     generatedAt,
@@ -1320,40 +1361,8 @@ function factoryCoordinatorSummary(workspaceDir: string) {
       stale: 0,
       forwardable: 2,
     },
-    agents: [
-      factoryCoordinatorAgent({
-        id: "live-busy",
-        kind: "live",
-        provider: "codex",
-        title: "busy build agent",
-        status: "busy",
-        lifecycle: "running",
-        currentTask: `Implementing the factory station renderer. ${longFactoryToken}`,
-        cwd: path.join(workspaceDir, longFactoryToken),
-      }),
-      factoryCoordinatorAgent({
-        id: "live-idle",
-        kind: "live",
-        provider: "claude",
-        title: "idle review agent",
-        status: "idle",
-        lifecycle: "running",
-        currentTask: "Ready for inspection.",
-        cwd: workspaceDir,
-      }),
-      factoryCoordinatorAgent({
-        id: "recent:codex:recent-thread",
-        kind: "recent",
-        provider: "codex",
-        providerSessionId: "recent-thread",
-        title: "recent codex thread",
-        status: "idle",
-        lifecycle: "recent",
-        currentTask: "Polished the earlier station sketch.",
-        cwd: workspaceDir,
-        forwardable: false,
-      }),
-    ],
+    areas: factoryCoordinatorAreas(agents),
+    agents,
     authority: {
       deterministic: true,
       autonomousProviderBehavior: false,
@@ -1369,6 +1378,30 @@ function factoryCoordinatorSummary(workspaceDir: string) {
       createdAt: generatedAt,
     }],
   };
+}
+
+function factoryCoordinatorAreas(agents: Array<Record<string, any>>) {
+  const groups = new Map<string, Array<Record<string, any>>>();
+  for (const agent of agents) {
+    groups.set(agent.cwd, [...groups.get(agent.cwd) || [], agent]);
+  }
+  return [...groups.entries()].map(([cwd, areaAgents], index) => ({
+    id: `cwd:${index}`,
+    cwd,
+    label: path.basename(cwd) || cwd,
+    agentIds: areaAgents.map((agent) => agent.stableId),
+    counts: {
+      agents: areaAgents.length,
+      live: areaAgents.filter((agent) => agent.kind === "live").length,
+      recent: areaAgents.filter((agent) => agent.kind === "recent").length,
+      running: areaAgents.filter((agent) => agent.lifecycle === "running").length,
+      busy: areaAgents.filter((agent) => agent.status === "busy").length,
+      idle: areaAgents.filter((agent) => agent.status === "idle").length,
+      exited: areaAgents.filter((agent) => agent.status === "exited").length,
+      stale: areaAgents.filter((agent) => agent.freshness.level === "stale").length,
+      forwardable: areaAgents.filter((agent) => agent.forwardable).length,
+    },
+  }));
 }
 
 function factoryCoordinatorAgent(overrides: Record<string, any>) {
