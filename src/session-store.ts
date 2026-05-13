@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { Database } from "bun:sqlite";
 import { createNodeSqliteClient, type SyncClient } from "sqlfu";
 import {
+  archiveSession,
   getSession,
   getSessionRecovery,
   recordSession,
@@ -17,6 +18,7 @@ export type StoredSession = {
   cwd: string;
   launchCommand: string;
   createdAtMs: number;
+  archivedAtMs: number | null;
   recoveryCommand: string | null;
   recoveryCreatedAtMs: number | null;
 };
@@ -32,6 +34,11 @@ export type SetStoredSessionRecoveryInput = {
   sessionId: string;
   recoveryCommand: string;
   createdAtMs: number;
+};
+
+export type ArchiveStoredSessionInput = {
+  sessionId: string;
+  archivedAtMs: number;
 };
 
 const definitionsPath = path.resolve(import.meta.dirname, "../db/definitions.sql");
@@ -64,6 +71,9 @@ export function createSessionStore(databasePath: string) {
     setSessionRecovery(input: SetStoredSessionRecoveryInput) {
       setSessionRecovery(client, input);
     },
+    archiveSession(input: ArchiveStoredSessionInput) {
+      archiveSession(client, { archivedAtMs: input.archivedAtMs }, { sessionId: input.sessionId });
+    },
     getSession(id: string): StoredSession | null {
       const session = getSession(client, { id });
       if (!session) {
@@ -75,6 +85,7 @@ export function createSessionStore(databasePath: string) {
         cwd: session.cwd,
         launchCommand: session.launch_command,
         createdAtMs: session.created_at_ms,
+        archivedAtMs: session.archived_at_ms || null,
         recoveryCommand: recovery?.recovery_command || null,
         recoveryCreatedAtMs: recovery?.created_at_ms || null,
       };
@@ -91,4 +102,15 @@ export function createSessionStore(databasePath: string) {
 function initializeSessionStore(client: SyncClient) {
   client.raw("pragma foreign_keys = on;");
   client.raw(fs.readFileSync(definitionsPath, "utf8"));
+  addColumnIfMissing(client, "sessions", "archived_at_ms integer");
+}
+
+function addColumnIfMissing(client: SyncClient, tableName: string, definition: string) {
+  try {
+    client.raw(`alter table ${tableName} add column ${definition};`);
+  } catch (error) {
+    if (!String(error).includes("duplicate column name")) {
+      throw error;
+    }
+  }
 }

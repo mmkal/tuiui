@@ -38,6 +38,7 @@ type SessionPayload = {
   command: string;
   args: string[];
   cwd: string;
+  archivedAtMs: number | null;
   updatedAt: string;
   lifecycle: "running" | "exited";
   status: "busy" | "idle" | "exited";
@@ -62,6 +63,7 @@ type SessionRecoveryPayload = {
   cwd: string;
   launchCommand: string;
   createdAtMs: number;
+  archivedAtMs: number | null;
   recoveryCommand: string | null;
   recoveryCreatedAtMs: number | null;
   recoverable: boolean;
@@ -947,6 +949,7 @@ async function renderSession(sessionId: string) {
                 <button type="button" class="icon-button" data-renderer="sdk" aria-pressed="${renderer === "sdk"}">Debug</button>
                 <button type="button" class="icon-button" data-action="pause-events" aria-pressed="false">Pause events</button>
                 <button type="button" class="icon-button" data-action="relayout">Relayout</button>
+                <button type="button" class="icon-button" data-action="archive-session">Archive</button>
               </div>
             </div>
           </div>
@@ -1129,6 +1132,10 @@ function bindSessionControls(sessionId: string) {
   document.querySelector<HTMLButtonElement>("[data-action='relayout']")?.addEventListener("click", () => {
     relayoutTerminal(sessionId);
     closeSessionMenu();
+  });
+
+  document.querySelector<HTMLButtonElement>("[data-action='archive-session']")?.addEventListener("click", () => {
+    void archiveSession(sessionId);
   });
 
   document.querySelectorAll<HTMLButtonElement>("[data-terminal-scroll]").forEach((button) => {
@@ -1523,6 +1530,17 @@ async function sendComposer(sessionId: string) {
   });
   clearComposerAttachments();
   scheduleTerminalResize(sessionId);
+}
+
+async function archiveSession(sessionId: string) {
+  try {
+    await api(`/api/sessions/${sessionId}/archive`, { method: "POST" });
+    closeSessionMenu();
+    history.pushState({}, "", "/");
+    await renderRoute();
+  } catch (error) {
+    showRequestErrorToast("Archive session failed", error, "archive-session-error-toast");
+  }
 }
 
 async function sendKey(sessionId: string, key: string) {

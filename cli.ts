@@ -99,6 +99,7 @@ type SessionPayload = {
   command: string;
   args: string[];
   cwd: string;
+  archivedAtMs: number | null;
   createdAt: string;
   updatedAt: string;
   lastOutputAt: string;
@@ -127,6 +128,7 @@ type RuntimeSession = {
   args: string[];
   cwd: string;
   env: Record<string, string>;
+  archivedAtMs: number | null;
   createdAt: string;
   updatedAt: string;
   lastOutputAt: string;
@@ -328,6 +330,7 @@ function createAppRouter(state: ServerState) {
       get: orpc.input(sessionIdInputSchema).handler(({ input }) => sessionPayloadById(state, input.sessionId)),
       recovery: orpc.input(sessionIdInputSchema).handler(({ input }) => sessionRecoveryPayload(state, input.sessionId)),
       recover: orpc.input(sessionIdInputSchema).handler(({ input }) => recoverStoredSessionPayload(state, input.sessionId)),
+      archive: orpc.input(sessionIdInputSchema).handler(({ input }) => archiveSessionPayload(state, input.sessionId)),
       send: orpc.input(sendSessionInputSchema).handler(({ input }) => sendSessionPayload(state, input)),
       key: orpc.input(keySessionInputSchema).handler(({ input }) => keySessionPayload(state, input)),
       resize: orpc.input(resizeSessionInputSchema).handler(({ input }) => resizeSessionPayload(state, input)),
@@ -383,6 +386,10 @@ async function handleApiRequest(state: ServerState, request: Request, url: URL):
 
   if (request.method === "POST" && action === "recover") {
     return await jsonOrRpcErrorAsync(() => recoverStoredSessionPayload(state, sessionId));
+  }
+
+  if (request.method === "POST" && action === "archive") {
+    return await jsonOrRpcErrorAsync(() => archiveSessionPayload(state, sessionId));
   }
 
   const session = state.sessions.get(sessionId) || await reconnectSession(state, sessionId);
@@ -477,7 +484,9 @@ function commandPresetsPayload() {
 }
 
 function sessionsListPayload(state: ServerState) {
-  return [...state.sessions.values()].map(toSessionListItem);
+  return [...state.sessions.values()]
+    .filter((session) => !session.archivedAtMs && !state.sessionStore.getSession(session.id)?.archivedAtMs)
+    .map(toSessionListItem);
 }
 
 async function createSessionPayload(body: CreateSessionBody) {
@@ -512,6 +521,7 @@ function sessionRecoveryPayload(state: ServerState, sessionId: string) {
     cwd: session.cwd,
     launchCommand: session.launchCommand,
     createdAtMs: session.createdAtMs,
+    archivedAtMs: session.archivedAtMs,
     recoveryCommand: session.recoveryCommand,
     recoveryCreatedAtMs: session.recoveryCreatedAtMs,
     recoverable: Boolean(session.recoveryCommand),
@@ -527,6 +537,9 @@ async function recoverStoredSessionPayload(state: ServerState, sessionId: string
   const storedSession = state.sessionStore.getSession(sessionId);
   if (!storedSession) {
     throw new ORPCError("NOT_FOUND", { message: "Session not found" });
+  }
+  if (storedSession.archivedAtMs) {
+    throw new ORPCError("CONFLICT", { message: "session is archived" });
   }
   if (!storedSession.recoveryCommand) {
     throw new ORPCError("CONFLICT", { message: "session is known, but no recovery command is available yet" });
@@ -550,6 +563,24 @@ async function recoverStoredSessionPayload(state: ServerState, sessionId: string
     launchCommand: storedSession.launchCommand,
   });
   return { id: session.id, url: `${baseUrl}/sessions/${session.id}` };
+}
+
+async function archiveSessionPayload(state: ServerState, sessionId: string) {
+  const session = state.sessions.get(sessionId) || await reconnectSession(state, sessionId);
+  const storedSession = state.sessionStore.getSession(sessionId);
+  if (!session && !storedSession) {
+    throw new ORPCError("NOT_FOUND", { message: "Session not found" });
+  }
+
+  const archivedAtMs = Date.now();
+  state.sessionStore.archiveSession({ sessionId, archivedAtMs });
+  if (session) {
+    session.archivedAtMs = archivedAtMs;
+    publishSession(session);
+    state.sessions.delete(session.id);
+    await killSession(session);
+  }
+  return { ok: true, archivedAtMs };
 }
 
 async function sendSessionPayload(state: ServerState, input: SendSessionInput) {
@@ -588,6 +619,10 @@ async function summarizeSessionSdkPayload(state: ServerState, sessionId: string)
 }
 
 async function liveSessionById(state: ServerState, sessionId: string) {
+  const storedSession = state.sessionStore.getSession(sessionId);
+  if (storedSession?.archivedAtMs) {
+    throw new ORPCError("NOT_FOUND", { message: "Session not found" });
+  }
   const session = state.sessions.get(sessionId) || await reconnectSession(state, sessionId);
   if (!session) {
     throw new ORPCError("NOT_FOUND", { message: "Session not found" });
@@ -736,6 +771,7 @@ async function createSession(input: CreateSessionInput) {
     args,
     cwd,
     env,
+    archivedAtMs: null,
     createdAt: now,
     updatedAt: now,
     lastOutputAt: now,
@@ -813,6 +849,10 @@ async function createSession(input: CreateSessionInput) {
 }
 
 async function reconnectSession(state: ServerState, id: string) {
+  const storedSession = state.sessionStore.getSession(id);
+  if (storedSession?.archivedAtMs) {
+    return null;
+  }
   if (!id || !tmuxHasSession(id)) {
     return null;
   }
@@ -845,6 +885,7 @@ async function reconnectSession(state: ServerState, id: string) {
     args: sdk.args,
     cwd: metadata.cwd,
     env: minimalEnv(process.env),
+    archivedAtMs: null,
     createdAt: metadata.createdAt,
     updatedAt: now,
     lastOutputAt: now,
@@ -1214,6 +1255,7 @@ function getSessionPayload(session: RuntimeSession): SessionPayload {
     command: session.command,
     args: session.args,
     cwd: session.cwd,
+    archivedAtMs: session.archivedAtMs,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     lastOutputAt: session.lastOutputAt,
