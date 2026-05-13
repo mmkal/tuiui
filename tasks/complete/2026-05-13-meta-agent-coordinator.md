@@ -1,11 +1,11 @@
 ---
-status: ready-for-implementation
+status: implemented
 size: large
 ---
 
 # Meta-Agent Coordinator
 
-Status: Ready for a first coordinator slice. The bedtime implementation should create a deterministic "meta-agent" surface: a consolidated state-of-the-agents summary, a compact supervisor panel, and a confirmation-gated prompt forwarding flow. It should not make the coordinator autonomous or introduce a new LLM/provider yet.
+Status: Implemented for the first deterministic coordinator slice. The branch now has a provider-neutral summary model/API, a compact home-page supervisor panel, and confirmation-gated prompt forwarding into selected live sessions. Missing pieces are intentionally future-scoped: no autonomous provider/LLM behavior and no factory-floor visualization.
 
 ## Goal
 
@@ -29,15 +29,15 @@ Voice can be represented by the same routing model as typed coordinator input in
 
 ## Checklist
 
-- [ ] Define the provider-neutral state-of-the-agents summary schema for active and recent agents.
-- [ ] Identify the current sources of truth for sessions, titles, providers, status, cwd, branches, task files, PRs, recovery commands, and session briefs.
-- [ ] Add a backend endpoint that returns a consolidated state-of-the-agents summary.
-- [ ] Render a supervisor/coordinator client surface that can answer "what is going on?" from that summary without a new LLM call.
-- [ ] Add a typed prompt-routing flow where the user chooses or resolves a target session.
-- [ ] Require explicit user confirmation before the coordinator sends a prompt into another agent session.
-- [ ] Add an audit trail in the UI showing what the coordinator observed and forwarded during the page session.
-- [ ] Add tests around summary freshness, target-session resolution, and prompt-forwarding confirmation.
-- [ ] Document the coordinator's authority boundaries so future agents do not make it too autonomous by accident.
+- [x] Define the provider-neutral state-of-the-agents summary schema for active and recent agents. _Implemented as `tuiui.coordinatorSummary.v1` in `src/meta-agent-coordinator.ts`._
+- [x] Identify the current sources of truth for sessions, titles, providers, status, cwd, branches, task files, PRs, recovery commands, and session briefs. _Mapped live runtime payloads, provider recent-session readers, git cwd metadata, recovery commands, and structured session briefs in `cli.ts` and the summary model._
+- [x] Add a backend endpoint that returns a consolidated state-of-the-agents summary. _Added `GET /api/coordinator/summary` in `cli.ts`._
+- [x] Render a supervisor/coordinator client surface that can answer "what is going on?" from that summary without a new LLM call. _Added the home-page Coordinator panel in `client/app.ts` and `client/styles.css`._
+- [x] Add a typed prompt-routing flow where the user chooses or resolves a target session. _Added live-session target selection in the Coordinator panel and deterministic target resolution in `resolveCoordinatorTarget`._
+- [x] Require explicit user confirmation before the coordinator sends a prompt into another agent session. _Added staged UI confirmation and `POST /api/coordinator/forward` rejection unless `confirmed: true`._
+- [x] Add an audit trail in the UI showing what the coordinator observed and forwarded during the page session. _Added page-session audit entries for observations, successes, and forwarding failures in `client/app.ts`._
+- [x] Add tests around summary freshness, target-session resolution, and prompt-forwarding confirmation. _Added `test/meta-agent-coordinator.test.ts` and a focused Playwright spec in `spec/tuiui.spec.ts`._
+- [x] Document the coordinator's authority boundaries so future agents do not make it too autonomous by accident. _Documented boundaries in the task status and in the summary API `authority` payload._
 
 ## Open Questions
 
@@ -53,3 +53,5 @@ Voice can be represented by the same routing model as typed coordinator input in
 
 - 2026-05-13: Captured task from the request for a dumb coordinating meta-agent that can track separate sessions and relay rough voice prompts.
 - 2026-05-13: Bedtime scope narrowed to deterministic coordination: expose a state summary, render a supervisor surface, and forward prompts only after explicit confirmation.
+- 2026-05-13: Implemented `GET /api/coordinator/summary` and `POST /api/coordinator/forward`, plus the home-page supervisor UI and page-session audit trail.
+- 2026-05-13: Verified with `bun test test/meta-agent-coordinator.test.ts`, `bun run spec --grep "coordinator summary"`, and `bun run typecheck`.

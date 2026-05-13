@@ -362,6 +362,86 @@ test("loads home when a recent provider database cannot be opened", async ({ pag
   await expect(page.locator(".recent-agents")).toHaveCount(0);
 });
 
+test("renders a coordinator summary and forwards prompts only after confirmation", async ({ page, ctx }) => {
+  await page.goto(ctx.baseUrl);
+  const first = await createSessionFromHome(page, {
+    command: "bytewise-ui",
+    args: [],
+    cwd: ctx.workspaceDir,
+  });
+  const second = await createSessionFromHome(page, {
+    command: "scrollback-agent",
+    args: [],
+    cwd: ctx.workspaceDir,
+  });
+
+  await page.goto(ctx.baseUrl);
+  await expect(page.getByTestId("coordinator-panel")).toContainText("Coordinator");
+  await expect(page.getByTestId("coordinator-observations")).toContainText("2 live sessions");
+  await expect(page.getByTestId("coordinator-audit")).toContainText("Observed 2 live sessions");
+
+  const summary = await fetchCoordinatorSummary(page);
+  expect(summary).toMatchObject({
+    format: "tuiui.coordinatorSummary.v1",
+    counts: {
+      live: 2,
+      forwardable: 2,
+    },
+    authority: {
+      autonomousProviderBehavior: false,
+      requiresConfirmation: true,
+    },
+  });
+  const target = summary.agents.find((agent: any) => agent.id === first.id);
+  expect(target).toMatchObject({
+    id: first.id,
+    forwardable: true,
+    metadata: {
+      source: "runtime",
+    },
+  });
+
+  const rejected = await page.evaluate(async (targetId) => {
+    const response = await fetch("/api/coordinator/forward", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        target: targetId,
+        text: "unconfirmed coordinator prompt",
+        confirmed: false,
+      }),
+    });
+    return {
+      status: response.status,
+      body: await response.json(),
+    };
+  }, first.id);
+  expect(rejected).toMatchObject({
+    status: 409,
+    body: {
+      requiresConfirmation: true,
+      resolution: {
+        status: "resolved",
+      },
+    },
+  });
+  expect((await fetchSessionPayloadById(page, first.id)).stdinEvents).toHaveLength(0);
+
+  await page.getByRole("combobox", { name: "Target live session" }).selectOption(first.id);
+  await page.getByRole("textbox", { name: "Coordinator prompt" }).fill("confirmed coordinator prompt");
+  await page.getByRole("button", { name: "Stage prompt" }).click();
+  await expect(page.getByRole("region", { name: "Confirm coordinator prompt" })).toContainText("confirmed coordinator prompt");
+  expect((await fetchSessionPayloadById(page, first.id)).stdinEvents).toHaveLength(0);
+
+  await page.getByRole("button", { name: "Confirm forward" }).click();
+
+  await expect(page.getByTestId("coordinator-audit")).toContainText("Forwarded prompt");
+  await expect.poll(async () => {
+    return (await fetchSessionPayloadById(page, first.id)).stdinEvents.at(-1)?.text;
+  }).toBe("confirmed coordinator prompt");
+  expect((await fetchSessionPayloadById(page, second.id)).stdinEvents).toHaveLength(0);
+});
+
 test("sends named key chords separately from the composer", async ({ page, ctx }) => {
   await launchFakeCodex(page, ctx);
   await clickSessionMenuButton(page, "HTML");
@@ -1054,6 +1134,40 @@ async function fetchSessionPayload(page: Page) {
     const id = location.pathname.split("/").at(-1);
     return await fetch(`/api/sessions/${id}`).then((response) => response.json());
   });
+}
+
+async function fetchSessionPayloadById(page: Page, sessionId: string) {
+  return await page.evaluate(async (id) => {
+    return await fetch(`/api/sessions/${id}`).then((response) => response.json());
+  }, sessionId);
+}
+
+async function fetchCoordinatorSummary(page: Page) {
+  return await page.evaluate(async () => {
+    return await fetch("/api/coordinator/summary").then((response) => response.json());
+  });
+}
+
+async function createSessionFromHome(
+  page: Page,
+  input: { command: string; args: string[]; cwd: string },
+) {
+  return await page.evaluate(async (sessionInput) => {
+    const response = await fetch("/api/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        command: sessionInput.command,
+        args: sessionInput.args,
+        cwd: sessionInput.cwd,
+        cols: 120,
+        rows: 42,
+        env: {},
+        fakeAgent: "",
+      }),
+    });
+    return await response.json();
+  }, input) as { id: string; url: string };
 }
 
 async function fetchTuishot(page: Page) {

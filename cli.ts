@@ -60,6 +60,13 @@ import { analyzeTerminalBlocks, type TerminalBlockModel } from "./src/terminal-b
 import { composerSubmitChunks, usesLfCrSubmit } from "./src/terminal-input.ts";
 import { formatCommandLine, parseCommandLine } from "./src/command-line.ts";
 import {
+  createCoordinatorSummary,
+  resolveCoordinatorTarget,
+  type CoordinatorWorkspaceMetadata,
+  type LiveCoordinatorSessionInput,
+  type RecentCoordinatorSessionInput,
+} from "./src/meta-agent-coordinator.ts";
+import {
   createTmuxBackend,
   reconnectTmuxBackend,
   resolveSessionBackend,
@@ -303,6 +310,14 @@ async function handleApiRequest(state: ServerState, request: Request, url: URL):
 
   if (request.method === "GET" && url.pathname === "/api/agent-sessions/recent") {
     return Response.json(await readRecentAgentSessions());
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/coordinator/summary") {
+    return Response.json(await buildCoordinatorSummary(state));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/coordinator/forward") {
+    return await forwardCoordinatorPrompt(state, request);
   }
 
   if (request.method === "GET" && url.pathname === "/api/codex-sessions/recent") {
@@ -1281,6 +1296,139 @@ async function readRecentAgentSessions(): Promise<RecentAgentSession[]> {
     .flat()
     .sort((left, right) => Date.parse(right.lastMessageAt) - Date.parse(left.lastMessageAt))
     .slice(0, 24);
+}
+
+async function buildCoordinatorSummary(state: ServerState) {
+  const recentSessions = await readRecentAgentSessions();
+  const generatedAtMs = Date.now();
+  return createCoordinatorSummary({
+    generatedAtMs,
+    liveSessions: [...state.sessions.values()].map((session) => toLiveCoordinatorSessionInput(state, session)),
+    recentSessions: recentSessions.map(toRecentCoordinatorSessionInput),
+  });
+}
+
+function toLiveCoordinatorSessionInput(state: ServerState, session: RuntimeSession): LiveCoordinatorSessionInput {
+  const payload = getSessionPayload(session);
+  const recovery = state.sessionStore.getSession(session.id);
+  return {
+    id: payload.id,
+    title: payload.title,
+    command: payload.command,
+    args: payload.args,
+    cwd: payload.cwd,
+    createdAt: payload.createdAt,
+    updatedAt: payload.updatedAt,
+    lastOutputAt: payload.lastOutputAt,
+    lifecycle: payload.lifecycle,
+    status: payload.status,
+    exitCode: payload.exitCode,
+    sdk: payload.sdk,
+    stdinEvents: payload.stdinEvents,
+    stdoutEvents: payload.stdoutEvents,
+    semanticStatus: payload.semantic.status,
+    semanticPrompt: payload.semantic.prompt,
+    renderedText: payload.renderedText,
+    recoveryCommand: recovery?.recoveryCommand || "",
+    recoveryCreatedAt: recovery?.recoveryCreatedAtMs ? new Date(recovery.recoveryCreatedAtMs).toISOString() : "",
+    workspace: readCoordinatorWorkspaceMetadata(payload.cwd),
+  };
+}
+
+function toRecentCoordinatorSessionInput(session: RecentAgentSession): RecentCoordinatorSessionInput {
+  return {
+    ...session,
+    recoveryCommand: formatCommandLine(session.command, session.args),
+    recoveryCreatedAt: "",
+    workspace: readCoordinatorWorkspaceMetadata(session.cwd),
+  };
+}
+
+async function forwardCoordinatorPrompt(state: ServerState, request: Request) {
+  const body = await request.json() as {
+    target?: string;
+    targetSessionId?: string;
+    text?: string;
+    submit?: boolean;
+    confirmed?: boolean;
+  };
+  const text = String(body.text || "");
+  if (!text.trim()) {
+    return Response.json({ error: "Prompt text is required." }, { status: 400 });
+  }
+
+  const summary = await buildCoordinatorSummary(state);
+  const resolution = resolveCoordinatorTarget(summary.agents, String(body.targetSessionId || body.target || ""));
+  if (resolution.status !== "resolved" || !resolution.agent) {
+    return Response.json({
+      error: resolution.reason,
+      resolution,
+      summary,
+    }, { status: resolution.status === "ambiguous" ? 409 : 400 });
+  }
+
+  if (body.confirmed !== true) {
+    return Response.json({
+      error: "Coordinator forwarding requires explicit confirmation.",
+      resolution,
+      requiresConfirmation: true,
+    }, { status: 409 });
+  }
+
+  const session = state.sessions.get(resolution.agent.id);
+  if (!session || session.lifecycle !== "running") {
+    return Response.json({
+      error: "Target session is no longer live.",
+      resolution,
+    }, { status: 409 });
+  }
+
+  await sendToSession(state, session, text, body.submit !== false);
+  const forwardedAt = new Date().toISOString();
+  return Response.json({
+    ok: true,
+    forwardedAt,
+    target: {
+      id: resolution.agent.id,
+      title: resolution.agent.title,
+      provider: resolution.agent.provider,
+      cwd: resolution.agent.cwd,
+    },
+    audit: {
+      type: "coordinator.prompt.forwarded",
+      forwardedAt,
+      targetSessionId: resolution.agent.id,
+      promptPreview: text.slice(0, 240),
+      confirmed: true,
+    },
+  });
+}
+
+function readCoordinatorWorkspaceMetadata(cwd: string): CoordinatorWorkspaceMetadata {
+  const gitRoot = gitOutput(cwd, ["rev-parse", "--show-toplevel"]);
+  const branch = gitOutput(cwd, ["branch", "--show-current"]);
+  const gitHead = gitOutput(cwd, ["rev-parse", "--short", "HEAD"]);
+  return {
+    gitRoot,
+    branch: branch || (gitHead ? `detached:${gitHead}` : ""),
+    gitHead,
+    worktree: gitRoot,
+  };
+}
+
+function gitOutput(cwd: string, args: string[]) {
+  if (!cwd) {
+    return "";
+  }
+  try {
+    return execFileSync("git", ["-C", cwd, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 500,
+    }).trim();
+  } catch {
+    return "";
+  }
 }
 
 function realpathIfPossible(value: string) {
