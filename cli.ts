@@ -8,11 +8,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { stripVTControlCharacters } from "node:util";
+import { ORPCError, os as orpc } from "@orpc/server";
+import { RPCHandler } from "@orpc/server/fetch";
 import { Codex } from "@openai/codex-sdk";
 import { createOpencodeClient } from "@opencode-ai/sdk/client";
 import { Terminal as HeadlessTerminal } from "@xterm/headless";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { createFakeAgent, parseRequest, type AgentName, type FakeAgent } from "fakeagent";
+import { z } from "zod";
 import homepage from "./public/index.html";
 import {
   buildCodexSidecarSummary,
@@ -61,7 +64,6 @@ import { composerSubmitChunks, usesLfCrSubmit } from "./src/terminal-input.ts";
 import { formatCommandLine, parseCommandLine } from "./src/command-line.ts";
 import {
   createCoordinatorSummary,
-  resolveCoordinatorTarget,
   type CoordinatorWorkspaceMetadata,
   type LiveCoordinatorSessionInput,
   type RecentCoordinatorSessionInput,
@@ -196,6 +198,19 @@ type ServerState = {
   nextStdoutEventId: number;
   nextStdinEventId: number;
   sessionStore: SessionStore;
+  recentAgentSessionsCache: RecentAgentSessionsCache;
+  workspaceMetadataCache: Map<string, CachedWorkspaceMetadata>;
+};
+
+type RecentAgentSessionsCache = {
+  value: RecentAgentSession[] | null;
+  expiresAtMs: number;
+  promise: Promise<RecentAgentSession[]> | null;
+};
+
+type CachedWorkspaceMetadata = {
+  value: CoordinatorWorkspaceMetadata;
+  expiresAtMs: number;
 };
 
 const loopbackHost = "127.0.0.1";
@@ -206,8 +221,37 @@ const defaultRows = 42;
 const idleThresholdMs = 1_000;
 const redrawQuietMs = 600;
 const redrawMaxMs = 10_000;
+const recentAgentSessionsCacheTtlMs = 2_000;
+const workspaceMetadataCacheTtlMs = 10_000;
 const attachmentRoot = fs.mkdtempSync(path.join(os.tmpdir(), "tuiui-attachments-"));
 const terminalScrollbackSnapshotRows = 500;
+
+const createSessionBodySchema = z.object({
+  command: z.string().optional(),
+  args: z.array(z.string()).optional(),
+  cwd: z.string().optional(),
+  env: z.record(z.string(), z.string()).optional(),
+  cols: z.number().optional(),
+  rows: z.number().optional(),
+  fakeAgent: z.string().optional(),
+  backend: z.string().optional(),
+});
+const sessionIdInputSchema = z.object({ sessionId: z.string() });
+const sendSessionInputSchema = sessionIdInputSchema.extend({
+  text: z.string().optional(),
+  submit: z.boolean().optional(),
+});
+const keySessionInputSchema = sessionIdInputSchema.extend({ key: z.string().optional() });
+const resizeSessionInputSchema = sessionIdInputSchema.extend({
+  cols: z.number().optional(),
+  rows: z.number().optional(),
+});
+
+type CreateSessionBody = z.infer<typeof createSessionBodySchema>;
+type SessionIdInput = z.infer<typeof sessionIdInputSchema>;
+type SendSessionInput = z.infer<typeof sendSessionInputSchema>;
+type KeySessionInput = z.infer<typeof keySessionInputSchema>;
+type ResizeSessionInput = z.infer<typeof resizeSessionInputSchema>;
 
 const cli = parseCliArgs(process.argv.slice(2));
 const state: ServerState = {
@@ -215,6 +259,12 @@ const state: ServerState = {
   nextStdoutEventId: 1,
   nextStdinEventId: 1,
   sessionStore: createSessionStoreForEnv(process.env),
+  recentAgentSessionsCache: {
+    value: null,
+    expiresAtMs: 0,
+    promise: null,
+  },
+  workspaceMetadataCache: new Map(),
 };
 const server: ReturnType<typeof Bun.serve> = startServer({ host: cli.host, port: cli.port, state });
 const serverPort = Number(server.port || cli.port);
@@ -253,6 +303,7 @@ process.on("SIGINT", () => void shutdown(server, state));
 await new Promise(() => {});
 
 function startServer(options: { host: string; port: number; state: ServerState }): ReturnType<typeof Bun.serve> {
+  const rpcHandler = new RPCHandler(createAppRouter(options.state));
   return Bun.serve({
     port: options.port,
     hostname: options.host,
@@ -269,6 +320,13 @@ function startServer(options: { host: string; port: number; state: ServerState }
     },
     async fetch(request): Promise<Response> {
       const url = new URL(request.url);
+      const rpc = await rpcHandler.handle(request, {
+        prefix: "/rpc",
+        context: {},
+      });
+      if (rpc.matched) {
+        return rpc.response;
+      }
       if (!url.pathname.startsWith("/api/")) {
         return new Response("not found", { status: 404 });
       }
@@ -281,36 +339,50 @@ function startServer(options: { host: string; port: number; state: ServerState }
   });
 }
 
+function createAppRouter(state: ServerState) {
+  return orpc.router({
+    config: orpc.handler(() => configPayload()),
+    cwd: orpc.handler(() => cwdPayload()),
+    commands: orpc.handler(() => commandPresetsPayload()),
+    agentSessions: {
+      recent: orpc.handler(() => readRecentAgentSessions()),
+    },
+    codexSessions: {
+      recent: orpc.handler(() => readRecentCodexSessions()),
+    },
+    sessions: {
+      list: orpc.handler(() => sessionsListPayload(state)),
+      create: orpc.input(createSessionBodySchema).handler(({ input }) => createSessionPayload(input)),
+      get: orpc.input(sessionIdInputSchema).handler(({ input }) => sessionPayloadById(state, input.sessionId)),
+      recovery: orpc.input(sessionIdInputSchema).handler(({ input }) => sessionRecoveryPayload(state, input.sessionId)),
+      recover: orpc.input(sessionIdInputSchema).handler(({ input }) => recoverStoredSessionPayload(state, input.sessionId)),
+      send: orpc.input(sendSessionInputSchema).handler(({ input }) => sendSessionPayload(state, input)),
+      key: orpc.input(keySessionInputSchema).handler(({ input }) => keySessionPayload(state, input)),
+      resize: orpc.input(resizeSessionInputSchema).handler(({ input }) => resizeSessionPayload(state, input)),
+      kill: orpc.input(sessionIdInputSchema).handler(({ input }) => killSessionPayload(state, input.sessionId)),
+      sdkRefresh: orpc.input(sessionIdInputSchema).handler(({ input }) => refreshSessionSdkPayload(state, input.sessionId)),
+      sdkSummarize: orpc.input(sessionIdInputSchema).handler(({ input }) => summarizeSessionSdkPayload(state, input.sessionId)),
+    },
+  });
+}
+
+export type AppRouter = ReturnType<typeof createAppRouter>;
+
 async function handleApiRequest(state: ServerState, request: Request, url: URL): Promise<Response> {
   if (request.method === "GET" && url.pathname === "/api/config") {
-    return Response.json({
-      pageLoadToasts: process.env.TUIUI_PAGE_LOAD_TOASTS === "1",
-    });
+    return Response.json(configPayload());
   }
 
   if (request.method === "GET" && url.pathname === "/api/cwd") {
-    return Response.json({
-      cwd: fs.realpathSync(process.cwd()),
-      homeDir: os.homedir(),
-      homeDirs: [os.homedir(), realpathIfPossible(os.homedir())],
-    });
+    return Response.json(cwdPayload());
   }
 
   if (request.method === "GET" && url.pathname === "/api/commands") {
-    return Response.json([
-      { id: "custom", label: "Custom", command: "", args: [], fakeAgent: "" },
-      { id: "opencode", label: "OpenCode", command: "opencode", args: [], fakeAgent: "" },
-      { id: "codex", label: "Codex", command: "codex", args: [], fakeAgent: "" },
-      { id: "claude", label: "Claude", command: "claude", args: [], fakeAgent: "" },
-      { id: "fake-opencode", label: "Fake OpenCode", command: "opencode", args: [], fakeAgent: "opencode" },
-      { id: "fake-codex", label: "Fake Codex", command: "codex", args: [], fakeAgent: "codex" },
-      { id: "fake-claude", label: "Fake Claude", command: "claude", args: [], fakeAgent: "claude" },
-      { id: "ghui", label: "ghui", command: "ghui", args: [], fakeAgent: "" },
-    ]);
+    return Response.json(commandPresetsPayload());
   }
 
   if (request.method === "GET" && url.pathname === "/api/agent-sessions/recent") {
-    return Response.json(await readRecentAgentSessions());
+    return Response.json(await readCachedRecentAgentSessions(state));
   }
 
   if (request.method === "GET" && url.pathname === "/api/coordinator/summary") {
@@ -326,26 +398,11 @@ async function handleApiRequest(state: ServerState, request: Request, url: URL):
   }
 
   if (request.method === "GET" && url.pathname === "/api/sessions") {
-    return Response.json([...state.sessions.values()].map(toSessionListItem));
+    return Response.json(sessionsListPayload(state));
   }
 
   if (request.method === "POST" && url.pathname === "/api/sessions") {
-    const body = await request.json() as Partial<CreateSessionInput>;
-    const command = body.command || "";
-    const args = Array.isArray(body.args) ? body.args.map(String) : [];
-    const session = await createSession({
-      id: createSessionId(),
-      command,
-      args,
-      cwd: body.cwd || process.cwd(),
-      env: body.env || {},
-      cols: Number(body.cols || defaultCols),
-      rows: Number(body.rows || defaultRows),
-      fakeAgent: isAgentName(body.fakeAgent) ? body.fakeAgent : "",
-      backend: resolveBackendForLaunch(body.backend),
-      launchCommand: formatCommandLine(command, args),
-    });
-    return Response.json({ id: session.id, url: `${baseUrl}/sessions/${session.id}` });
+    return Response.json(await createSessionPayload(await request.json() as CreateSessionBody));
   }
 
   const match = url.pathname.match(/^\/api\/sessions\/([^/]+)(?:\/([^/]+))?$/);
@@ -357,11 +414,11 @@ async function handleApiRequest(state: ServerState, request: Request, url: URL):
   const action = match[2] || "";
 
   if (request.method === "GET" && action === "recovery") {
-    return createSessionRecoveryResponse(state, sessionId);
+    return jsonOrRpcError(() => sessionRecoveryPayload(state, sessionId));
   }
 
   if (request.method === "POST" && action === "recover") {
-    return await recoverStoredSession(state, sessionId);
+    return await jsonOrRpcErrorAsync(() => recoverStoredSessionPayload(state, sessionId));
   }
 
   const session = state.sessions.get(sessionId) || await reconnectSession(state, sessionId);
@@ -389,9 +446,10 @@ async function handleApiRequest(state: ServerState, request: Request, url: URL):
   }
 
   if (request.method === "POST" && action === "send") {
-    const body = await request.json() as { text?: string; submit?: boolean };
-    await sendToSession(state, session, String(body.text || ""), body.submit !== false);
-    return Response.json({ ok: true });
+    return Response.json(await sendSessionPayload(state, {
+      sessionId,
+      ...await request.json() as Omit<SendSessionInput, "sessionId">,
+    }));
   }
 
   if (request.method === "POST" && action === "attachments") {
@@ -399,41 +457,93 @@ async function handleApiRequest(state: ServerState, request: Request, url: URL):
   }
 
   if (request.method === "POST" && action === "sdk-refresh") {
-    await refreshSessionSdk(session);
-    return Response.json(getSessionPayload(session));
+    return Response.json(await refreshSessionSdkPayload(state, sessionId));
   }
 
   if (request.method === "POST" && action === "sdk-summarize") {
-    startSessionBriefJob(session);
-    return Response.json(getSessionPayload(session));
+    return Response.json(await summarizeSessionSdkPayload(state, sessionId));
   }
 
   if (request.method === "POST" && action === "key") {
-    const body = await request.json() as { key?: string };
-    await sendToSession(state, session, resolveKeySequence(String(body.key || "")), false);
-    return Response.json({ ok: true });
+    return Response.json(await keySessionPayload(state, {
+      sessionId,
+      ...await request.json() as Omit<KeySessionInput, "sessionId">,
+    }));
   }
 
   if (request.method === "POST" && action === "resize") {
-    const body = await request.json() as { cols?: number; rows?: number };
-    await resizeSession(session, Number(body.cols || session.cols), Number(body.rows || session.rows));
-    return Response.json({ ok: true });
+    return Response.json(await resizeSessionPayload(state, {
+      sessionId,
+      ...await request.json() as Omit<ResizeSessionInput, "sessionId">,
+    }));
   }
 
   if (request.method === "POST" && action === "kill") {
-    await killSession(session);
-    return Response.json({ ok: true });
+    return Response.json(await killSessionPayload(state, sessionId));
   }
 
   return new Response("not found", { status: 404 });
 }
 
-function createSessionRecoveryResponse(state: ServerState, sessionId: string) {
+function configPayload() {
+  return {
+    pageLoadToasts: process.env.TUIUI_PAGE_LOAD_TOASTS === "1",
+  };
+}
+
+function cwdPayload() {
+  return {
+    cwd: fs.realpathSync(process.cwd()),
+    homeDir: os.homedir(),
+    homeDirs: [os.homedir(), realpathIfPossible(os.homedir())],
+  };
+}
+
+function commandPresetsPayload() {
+  return [
+    { id: "custom", label: "Custom", command: "", args: [], fakeAgent: "" },
+    { id: "opencode", label: "OpenCode", command: "opencode", args: [], fakeAgent: "" },
+    { id: "codex", label: "Codex", command: "codex", args: [], fakeAgent: "" },
+    { id: "claude", label: "Claude", command: "claude", args: [], fakeAgent: "" },
+    { id: "fake-opencode", label: "Fake OpenCode", command: "opencode", args: [], fakeAgent: "opencode" },
+    { id: "fake-codex", label: "Fake Codex", command: "codex", args: [], fakeAgent: "codex" },
+    { id: "fake-claude", label: "Fake Claude", command: "claude", args: [], fakeAgent: "claude" },
+    { id: "ghui", label: "ghui", command: "ghui", args: [], fakeAgent: "" },
+  ];
+}
+
+function sessionsListPayload(state: ServerState) {
+  return [...state.sessions.values()].map(toSessionListItem);
+}
+
+async function createSessionPayload(body: CreateSessionBody) {
+  const command = body.command || "";
+  const args = Array.isArray(body.args) ? body.args.map(String) : [];
+  const session = await createSession({
+    id: createSessionId(),
+    command,
+    args,
+    cwd: body.cwd || process.cwd(),
+    env: body.env || {},
+    cols: Number(body.cols || defaultCols),
+    rows: Number(body.rows || defaultRows),
+    fakeAgent: isAgentName(body.fakeAgent) ? body.fakeAgent : "",
+    backend: resolveBackendForLaunch(body.backend),
+    launchCommand: formatCommandLine(command, args),
+  });
+  return { id: session.id, url: `${baseUrl}/sessions/${session.id}` };
+}
+
+async function sessionPayloadById(state: ServerState, sessionId: string) {
+  return getSessionPayload(await liveSessionById(state, sessionId));
+}
+
+function sessionRecoveryPayload(state: ServerState, sessionId: string) {
   const session = state.sessionStore.getSession(sessionId);
   if (!session) {
-    return Response.json({ error: "Session not found" }, { status: 404 });
+    throw new ORPCError("NOT_FOUND", { message: "Session not found" });
   }
-  return Response.json({
+  return {
     id: session.id,
     cwd: session.cwd,
     launchCommand: session.launchCommand,
@@ -441,26 +551,26 @@ function createSessionRecoveryResponse(state: ServerState, sessionId: string) {
     recoveryCommand: session.recoveryCommand,
     recoveryCreatedAtMs: session.recoveryCreatedAtMs,
     recoverable: Boolean(session.recoveryCommand),
-  });
+  };
 }
 
-async function recoverStoredSession(state: ServerState, sessionId: string) {
+async function recoverStoredSessionPayload(state: ServerState, sessionId: string) {
   const liveSession = state.sessions.get(sessionId) || await reconnectSession(state, sessionId);
   if (liveSession) {
-    return Response.json({ id: liveSession.id, url: `${baseUrl}/sessions/${liveSession.id}` });
+    return { id: liveSession.id, url: `${baseUrl}/sessions/${liveSession.id}` };
   }
 
   const storedSession = state.sessionStore.getSession(sessionId);
   if (!storedSession) {
-    return Response.json({ error: "Session not found" }, { status: 404 });
+    throw new ORPCError("NOT_FOUND", { message: "Session not found" });
   }
   if (!storedSession.recoveryCommand) {
-    return Response.json({ error: "session is known, but no recovery command is available yet" }, { status: 409 });
+    throw new ORPCError("CONFLICT", { message: "session is known, but no recovery command is available yet" });
   }
 
   const recovery = parseCommandLine(storedSession.recoveryCommand);
   if (!recovery.command) {
-    return Response.json({ error: "stored recovery command is empty" }, { status: 409 });
+    throw new ORPCError("CONFLICT", { message: "stored recovery command is empty" });
   }
 
   const session = await createSession({
@@ -475,7 +585,73 @@ async function recoverStoredSession(state: ServerState, sessionId: string) {
     backend: resolveBackendForLaunch(""),
     launchCommand: storedSession.launchCommand,
   });
-  return Response.json({ id: session.id, url: `${baseUrl}/sessions/${session.id}` });
+  return { id: session.id, url: `${baseUrl}/sessions/${session.id}` };
+}
+
+async function sendSessionPayload(state: ServerState, input: SendSessionInput) {
+  const session = await liveSessionById(state, input.sessionId);
+  await sendToSession(state, session, String(input.text || ""), input.submit !== false);
+  return { ok: true };
+}
+
+async function keySessionPayload(state: ServerState, input: KeySessionInput) {
+  const session = await liveSessionById(state, input.sessionId);
+  await sendToSession(state, session, resolveKeySequence(String(input.key || "")), false);
+  return { ok: true };
+}
+
+async function resizeSessionPayload(state: ServerState, input: ResizeSessionInput) {
+  const session = await liveSessionById(state, input.sessionId);
+  await resizeSession(session, Number(input.cols || session.cols), Number(input.rows || session.rows));
+  return { ok: true };
+}
+
+async function killSessionPayload(state: ServerState, sessionId: string) {
+  await killSession(await liveSessionById(state, sessionId));
+  return { ok: true };
+}
+
+async function refreshSessionSdkPayload(state: ServerState, sessionId: string) {
+  const session = await liveSessionById(state, sessionId);
+  await refreshSessionSdk(session);
+  return getSessionPayload(session);
+}
+
+async function summarizeSessionSdkPayload(state: ServerState, sessionId: string) {
+  const session = await liveSessionById(state, sessionId);
+  startSessionBriefJob(session);
+  return getSessionPayload(session);
+}
+
+async function liveSessionById(state: ServerState, sessionId: string) {
+  const session = state.sessions.get(sessionId) || await reconnectSession(state, sessionId);
+  if (!session) {
+    throw new ORPCError("NOT_FOUND", { message: "Session not found" });
+  }
+  return session;
+}
+
+function jsonOrRpcError(fn: () => unknown) {
+  try {
+    return Response.json(fn());
+  } catch (error) {
+    return jsonRpcErrorResponse(error);
+  }
+}
+
+async function jsonOrRpcErrorAsync(fn: () => Promise<unknown>) {
+  try {
+    return Response.json(await fn());
+  } catch (error) {
+    return jsonRpcErrorResponse(error);
+  }
+}
+
+function jsonRpcErrorResponse(error: unknown) {
+  if (error instanceof ORPCError) {
+    return Response.json({ error: error.message }, { status: error.status });
+  }
+  throw error;
 }
 
 async function saveSessionAttachment(session: RuntimeSession, request: Request, url: URL) {
@@ -1300,7 +1476,7 @@ async function readRecentAgentSessions(): Promise<RecentAgentSession[]> {
 }
 
 async function buildCoordinatorSummary(state: ServerState) {
-  const recentSessions = await readRecentAgentSessions();
+  const recentSessions = await readCachedRecentAgentSessions(state);
   const generatedAtMs = Date.now();
   return createCoordinatorSummary({
     generatedAtMs,
@@ -1332,7 +1508,7 @@ function toLiveCoordinatorSessionInput(state: ServerState, session: RuntimeSessi
     renderedText: payload.renderedText,
     recoveryCommand: recovery?.recoveryCommand || "",
     recoveryCreatedAt: recovery?.recoveryCreatedAtMs ? new Date(recovery.recoveryCreatedAtMs).toISOString() : "",
-    workspace: readCoordinatorWorkspaceMetadata(payload.cwd),
+    workspace: readCoordinatorWorkspaceMetadata(state, payload.cwd),
   };
 }
 
@@ -1341,13 +1517,12 @@ function toRecentCoordinatorSessionInput(session: RecentAgentSession): RecentCoo
     ...session,
     recoveryCommand: formatCommandLine(session.command, session.args),
     recoveryCreatedAt: "",
-    workspace: readCoordinatorWorkspaceMetadata(session.cwd),
+    workspace: readCoordinatorWorkspaceMetadata(state, session.cwd),
   };
 }
 
 async function forwardCoordinatorPrompt(state: ServerState, request: Request) {
   const body = await request.json() as {
-    target?: string;
     targetSessionId?: string;
     text?: string;
     submit?: boolean;
@@ -1358,29 +1533,26 @@ async function forwardCoordinatorPrompt(state: ServerState, request: Request) {
     return Response.json({ error: "Prompt text is required." }, { status: 400 });
   }
 
-  const summary = await buildCoordinatorSummary(state);
-  const resolution = resolveCoordinatorTarget(summary.agents, String(body.targetSessionId || body.target || ""));
-  if (resolution.status !== "resolved" || !resolution.agent) {
-    return Response.json({
-      error: resolution.reason,
-      resolution,
-      summary,
-    }, { status: resolution.status === "ambiguous" ? 409 : 400 });
-  }
-
   if (body.confirmed !== true) {
     return Response.json({
       error: "Coordinator forwarding requires explicit confirmation.",
-      resolution,
       requiresConfirmation: true,
     }, { status: 409 });
   }
 
-  const session = state.sessions.get(resolution.agent.id);
-  if (!session || session.lifecycle !== "running") {
+  const targetSessionId = String(body.targetSessionId || "");
+  if (!targetSessionId) {
+    return Response.json({ error: "targetSessionId is required." }, { status: 400 });
+  }
+
+  const session = state.sessions.get(targetSessionId);
+  if (!session) {
+    return Response.json({ error: "Target session not found." }, { status: 404 });
+  }
+
+  if (session.lifecycle !== "running") {
     return Response.json({
       error: "Target session is no longer live.",
-      resolution,
     }, { status: 409 });
   }
 
@@ -1390,31 +1562,62 @@ async function forwardCoordinatorPrompt(state: ServerState, request: Request) {
     ok: true,
     forwardedAt,
     target: {
-      id: resolution.agent.id,
-      title: resolution.agent.title,
-      provider: resolution.agent.provider,
-      cwd: resolution.agent.cwd,
+      id: session.id,
+      title: sessionDisplayTitle(session),
+      provider: session.sdk.provider,
+      cwd: session.cwd,
     },
     audit: {
       type: "coordinator.prompt.forwarded",
       forwardedAt,
-      targetSessionId: resolution.agent.id,
+      targetSessionId: session.id,
       promptPreview: text.slice(0, 240),
       confirmed: true,
     },
   });
 }
 
-function readCoordinatorWorkspaceMetadata(cwd: string): CoordinatorWorkspaceMetadata {
+async function readCachedRecentAgentSessions(state: ServerState) {
+  const nowMs = Date.now();
+  const cache = state.recentAgentSessionsCache;
+  if (cache.value && cache.expiresAtMs > nowMs) {
+    return cache.value;
+  }
+  if (cache.promise) {
+    return await cache.promise;
+  }
+  cache.promise = readRecentAgentSessions()
+    .then((sessions) => {
+      cache.value = sessions;
+      cache.expiresAtMs = Date.now() + recentAgentSessionsCacheTtlMs;
+      return sessions;
+    })
+    .finally(() => {
+      cache.promise = null;
+    });
+  return await cache.promise;
+}
+
+function readCoordinatorWorkspaceMetadata(state: ServerState, cwd: string): CoordinatorWorkspaceMetadata {
+  const cacheKey = path.resolve(cwd || ".");
+  const cached = state.workspaceMetadataCache.get(cacheKey);
+  if (cached && cached.expiresAtMs > Date.now()) {
+    return cached.value;
+  }
   const gitRoot = gitOutput(cwd, ["rev-parse", "--show-toplevel"]);
   const branch = gitOutput(cwd, ["branch", "--show-current"]);
   const gitHead = gitOutput(cwd, ["rev-parse", "--short", "HEAD"]);
-  return {
+  const value = {
     gitRoot,
     branch: branch || (gitHead ? `detached:${gitHead}` : ""),
     gitHead,
     worktree: gitRoot,
   };
+  state.workspaceMetadataCache.set(cacheKey, {
+    value,
+    expiresAtMs: Date.now() + workspaceMetadataCacheTtlMs,
+  });
+  return value;
 }
 
 function gitOutput(cwd: string, args: string[]) {

@@ -16,6 +16,7 @@ import {
 import { parseCommandLine } from "../src/command-line.ts";
 import { stringify as stringifyYaml } from "yaml";
 import { attachmentUploadName, dedupeClipboardImageFiles, type AttachmentSource } from "./attachments.ts";
+import { callOrpcJsonApi } from "./orpc-client.ts";
 import { showToast } from "./toast.ts";
 import type { CoordinatorAgentSummary, CoordinatorSummary } from "../src/meta-agent-coordinator.ts";
 import {
@@ -988,7 +989,7 @@ function bindCoordinatorControls(summary: CoordinatorSummary, homeDirs: string[]
       const result = await api<{ forwardedAt: string; target: { id: string; title: string } }>("/api/coordinator/forward", {
         method: "POST",
         body: JSON.stringify({
-          target: pending.target,
+          targetSessionId: pending.target,
           text: pending.text,
           submit: true,
           confirmed: true,
@@ -1002,7 +1003,7 @@ function bindCoordinatorControls(summary: CoordinatorSummary, homeDirs: string[]
         prompt: pending.text,
         createdAt: result.forwardedAt,
       });
-      const nextSummary = await api<CoordinatorSummary>("/api/coordinator/summary");
+      const nextSummary = await api<CoordinatorSummary>("/api/coordinator/summary").catch(() => summary);
       renderCoordinatorPanelInto(nextSummary, homeDirs);
     } catch (error) {
       addCoordinatorAuditEvent({
@@ -3241,6 +3242,12 @@ function keyNameFromKeyboardEvent(event: KeyboardEvent) {
 }
 
 async function api<T>(path: string, init: RequestInit = {}) {
+  const orpcResult = await callOrpcJsonApi<T>(path, init);
+  if (orpcResult.handled) {
+    return orpcResult.value;
+  }
+
+  // SSE, stdout polling, uploads, and SVG responses stay on the legacy handlers for now.
   const response = await fetch(path, {
     ...init,
     headers: {

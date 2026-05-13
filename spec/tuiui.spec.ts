@@ -401,12 +401,12 @@ test("renders a coordinator summary and forwards prompts only after confirmation
     },
   });
 
-  const rejected = await page.evaluate(async (targetId) => {
+  const unconfirmed = await page.evaluate(async (targetId) => {
     const response = await fetch("/api/coordinator/forward", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        target: targetId,
+        targetSessionId: targetId,
         text: "unconfirmed coordinator prompt",
         confirmed: false,
       }),
@@ -416,22 +416,72 @@ test("renders a coordinator summary and forwards prompts only after confirmation
       body: await response.json(),
     };
   }, first.id);
-  expect(rejected).toMatchObject({
+  expect(unconfirmed).toMatchObject({
     status: 409,
     body: {
       requiresConfirmation: true,
-      resolution: {
-        status: "resolved",
-      },
     },
   });
   expect((await fetchSessionPayloadById(page, first.id)).stdinEvents).toHaveLength(0);
+
+  const fuzzy = await page.evaluate(async () => {
+    const response = await fetch("/api/coordinator/forward", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        target: "bytewise-ui",
+        text: "fuzzy coordinator prompt",
+        confirmed: true,
+      }),
+    });
+    return {
+      status: response.status,
+      body: await response.json(),
+    };
+  });
+  expect(fuzzy).toMatchObject({
+    status: 400,
+    body: {
+      error: "targetSessionId is required.",
+    },
+  });
+  expect((await fetchSessionPayloadById(page, first.id)).stdinEvents).toHaveLength(0);
+
+  writeBrokenCodexProviderStore(ctx);
+  await page.waitForTimeout(2_100);
+  const directExactForward = await page.evaluate(async (targetId) => {
+    const response = await fetch("/api/coordinator/forward", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        targetSessionId: targetId,
+        text: "direct exact coordinator prompt",
+        confirmed: true,
+      }),
+    });
+    return {
+      status: response.status,
+      body: await response.json(),
+    };
+  }, first.id);
+  expect(directExactForward).toMatchObject({
+    status: 200,
+    body: {
+      ok: true,
+      target: {
+        id: first.id,
+      },
+    },
+  });
+  await expect.poll(async () => {
+    return (await fetchSessionPayloadById(page, first.id)).stdinEvents.at(-1)?.text;
+  }).toBe("direct exact coordinator prompt");
 
   await page.getByRole("combobox", { name: "Target live session" }).selectOption(first.id);
   await page.getByRole("textbox", { name: "Coordinator prompt" }).fill("confirmed coordinator prompt");
   await page.getByRole("button", { name: "Stage prompt" }).click();
   await expect(page.getByRole("region", { name: "Confirm coordinator prompt" })).toContainText("confirmed coordinator prompt");
-  expect((await fetchSessionPayloadById(page, first.id)).stdinEvents).toHaveLength(0);
+  expect((await fetchSessionPayloadById(page, first.id)).stdinEvents).toHaveLength(1);
 
   await page.getByRole("button", { name: "Confirm forward" }).click();
 
@@ -1796,6 +1846,12 @@ function writeCodexFixtureState(
       ${updatedAtMs}
     );
   `]);
+}
+
+function writeBrokenCodexProviderStore(ctx: FixtureContext) {
+  const databasePath = path.join(ctx.env.HOME || "", ".codex", "state_5.sqlite");
+  fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+  fs.writeFileSync(databasePath, "not a sqlite database");
 }
 
 function writeRecentCodexFixtureState(
