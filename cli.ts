@@ -96,6 +96,7 @@ type SessionPayload = {
   command: string;
   args: string[];
   cwd: string;
+  archivedAtMs: number | null;
   createdAt: string;
   updatedAt: string;
   lastOutputAt: string;
@@ -124,6 +125,7 @@ type RuntimeSession = {
   args: string[];
   cwd: string;
   env: Record<string, string>;
+  archivedAtMs: number | null;
   createdAt: string;
   updatedAt: string;
   lastOutputAt: string;
@@ -310,7 +312,9 @@ async function handleApiRequest(state: ServerState, request: Request, url: URL):
   }
 
   if (request.method === "GET" && url.pathname === "/api/sessions") {
-    return Response.json([...state.sessions.values()].map(toSessionListItem));
+    return Response.json([...state.sessions.values()]
+      .filter((session) => !session.archivedAtMs && !state.sessionStore.getSession(session.id)?.archivedAtMs)
+      .map(toSessionListItem));
   }
 
   if (request.method === "POST" && url.pathname === "/api/sessions") {
@@ -346,6 +350,15 @@ async function handleApiRequest(state: ServerState, request: Request, url: URL):
 
   if (request.method === "POST" && action === "recover") {
     return await recoverStoredSession(state, sessionId);
+  }
+
+  if (request.method === "POST" && action === "archive") {
+    return await archiveSessionResponse(state, sessionId);
+  }
+
+  const storedSession = state.sessionStore.getSession(sessionId);
+  if (storedSession?.archivedAtMs) {
+    return Response.json({ error: "Session not found" }, { status: 404 });
   }
 
   const session = state.sessions.get(sessionId) || await reconnectSession(state, sessionId);
@@ -422,6 +435,7 @@ function createSessionRecoveryResponse(state: ServerState, sessionId: string) {
     cwd: session.cwd,
     launchCommand: session.launchCommand,
     createdAtMs: session.createdAtMs,
+    archivedAtMs: session.archivedAtMs,
     recoveryCommand: session.recoveryCommand,
     recoveryCreatedAtMs: session.recoveryCreatedAtMs,
     recoverable: Boolean(session.recoveryCommand),
@@ -437,6 +451,9 @@ async function recoverStoredSession(state: ServerState, sessionId: string) {
   const storedSession = state.sessionStore.getSession(sessionId);
   if (!storedSession) {
     return Response.json({ error: "Session not found" }, { status: 404 });
+  }
+  if (storedSession.archivedAtMs) {
+    return Response.json({ error: "session is archived" }, { status: 409 });
   }
   if (!storedSession.recoveryCommand) {
     return Response.json({ error: "session is known, but no recovery command is available yet" }, { status: 409 });
@@ -460,6 +477,24 @@ async function recoverStoredSession(state: ServerState, sessionId: string) {
     launchCommand: storedSession.launchCommand,
   });
   return Response.json({ id: session.id, url: `${baseUrl}/sessions/${session.id}` });
+}
+
+async function archiveSessionResponse(state: ServerState, sessionId: string) {
+  const session = state.sessions.get(sessionId) || await reconnectSession(state, sessionId);
+  const storedSession = state.sessionStore.getSession(sessionId);
+  if (!session && !storedSession) {
+    return Response.json({ error: "Session not found" }, { status: 404 });
+  }
+
+  const archivedAtMs = Date.now();
+  state.sessionStore.archiveSession({ sessionId, archivedAtMs });
+  if (session) {
+    session.archivedAtMs = archivedAtMs;
+    publishSession(session);
+    state.sessions.delete(session.id);
+    await killSession(session);
+  }
+  return Response.json({ ok: true, archivedAtMs });
 }
 
 async function saveSessionAttachment(session: RuntimeSession, request: Request, url: URL) {
@@ -580,6 +615,7 @@ async function createSession(input: CreateSessionInput) {
     args,
     cwd,
     env,
+    archivedAtMs: null,
     createdAt: now,
     updatedAt: now,
     lastOutputAt: now,
@@ -657,6 +693,10 @@ async function createSession(input: CreateSessionInput) {
 }
 
 async function reconnectSession(state: ServerState, id: string) {
+  const storedSession = state.sessionStore.getSession(id);
+  if (storedSession?.archivedAtMs) {
+    return null;
+  }
   if (!id || !tmuxHasSession(id)) {
     return null;
   }
@@ -689,6 +729,7 @@ async function reconnectSession(state: ServerState, id: string) {
     args: sdk.args,
     cwd: metadata.cwd,
     env: minimalEnv(process.env),
+    archivedAtMs: null,
     createdAt: metadata.createdAt,
     updatedAt: now,
     lastOutputAt: now,
@@ -1058,6 +1099,7 @@ function getSessionPayload(session: RuntimeSession): SessionPayload {
     command: session.command,
     args: session.args,
     cwd: session.cwd,
+    archivedAtMs: session.archivedAtMs,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     lastOutputAt: session.lastOutputAt,

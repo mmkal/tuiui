@@ -1991,6 +1991,7 @@ textarea {
   .command-prompt-field input,
   .cwd-field input {
     height: 32px;
+    font-size: 16px;
   }
 
   .cwd-field {
