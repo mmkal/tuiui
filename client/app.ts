@@ -553,40 +553,6 @@ function scheduleSessionIdleRefresh(payload: SessionPayload) {
   }, 1_250);
 }
 
-async function primeIdleNotificationSnapshotForCurrentRoute() {
-  if (activeSession) {
-    idleNotifications.primeOne(sessionPayloadIdleNotification(activeSession));
-    return;
-  }
-  if (location.pathname !== "/" && location.pathname !== "/sessions") {
-    return;
-  }
-  try {
-    const [sessions, recentAgentSessions] = await Promise.all([
-      api<SessionListItem[]>("/api/sessions"),
-      api<RecentAgentSession[]>("/api/agent-sessions/recent"),
-    ]);
-    idleNotifications.prime([
-      ...sessions.map((session) => sessionListItemIdleNotification(session, homeIdleNotificationDisplayDirs)),
-      ...recentAgentSessions.map((session) => recentAgentSessionIdleNotification(session, homeIdleNotificationDisplayDirs)),
-    ]);
-  } catch {
-  }
-}
-
-function startIdleNotificationPollingForCurrentRoute() {
-  if (!idleNotifications.isEnabled()) {
-    return;
-  }
-  if (activeSession) {
-    scheduleSessionIdleRefresh(activeSession);
-    return;
-  }
-  if (location.pathname === "/" || location.pathname === "/sessions") {
-    startHomeIdleNotificationPolling(homeIdleNotificationDisplayDirs);
-  }
-}
-
 function clearSessionIdleRefreshTimer() {
   if (sessionIdleRefreshTimer === null) {
     return;
