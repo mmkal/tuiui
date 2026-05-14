@@ -114,7 +114,42 @@ function resolveStoredCodexStateDatabasePath(databasePath: string) {
 }
 
 export function readRecentCodexSessionsFromDatabasePath(databasePath: string, nowMs: number) {
-  return recentCodexSessionsFromThreads(readCodexThreadsFromDatabasePath(databasePath), nowMs);
+  return recentCodexSessionsFromThreads(readRecentCodexThreadsFromDatabasePath(databasePath, nowMs), nowMs);
+}
+
+function readRecentCodexThreadsFromDatabasePath(databasePath: string, nowMs: number): CodexThreadRow[] {
+  const resolvedPath = resolveStoredCodexStateDatabasePath(databasePath);
+  if (!fs.existsSync(resolvedPath)) {
+    throw new Error(`Codex state database not found at ${resolvedPath}`);
+  }
+  const cutoffMs = nowMs - 24 * 60 * 60 * 1000;
+  const database = new Database(resolvedPath, { readonly: true, strict: true });
+  try {
+    return database.query(`
+      select
+        id,
+        rollout_path,
+        created_at,
+        updated_at,
+        source,
+        model_provider,
+        cwd,
+        title,
+        tokens_used,
+        first_user_message,
+        model,
+        reasoning_effort,
+        created_at_ms,
+        updated_at_ms
+      from threads
+      where archived = 0
+        and coalesce(updated_at_ms, updated_at * 1000, created_at_ms, created_at * 1000) >= $cutoffMs
+      order by coalesce(updated_at_ms, updated_at * 1000) desc
+      limit 500
+    `).all({ cutoffMs }) as CodexThreadRow[];
+  } finally {
+    database.close();
+  }
 }
 
 export function discardCodexThreadFromDatabasePath(databasePath: string, threadId: string) {

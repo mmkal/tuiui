@@ -1,8 +1,13 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import {
   buildOpenCodeSidecarSummary,
   buildOpenCodeSummary,
   createOpenCodeSummaryPrompt,
+  readRecentOpenCodeSessionsFromDatabasePath,
   recentOpenCodeSessionsFromRows,
   recentSessionPreviewFromMessages,
   resolveOpenCodeSession,
@@ -169,6 +174,32 @@ test("lists recent OpenCode sessions by latest visible message", () => {
   ]);
 });
 
+test("reads OpenCode messages only for sessions updated inside the recent window", () => {
+  using workspace = createTempWorkspace();
+  const databasePath = path.join(workspace.path, "opencode.db");
+  createOpenCodeDatabase(databasePath, [
+    {
+      id: "stale-with-recent-message",
+      updatedAt: "2026-05-09T09:45:00.000Z",
+      messages: [messageAt("user", "this message should not rescue a stale session", "2026-05-11T11:58:00.000Z")],
+    },
+    {
+      id: "recent",
+      updatedAt: "2026-05-11T11:59:00.000Z",
+      messages: [messageAt("user", "recent opencode ask", "2026-05-11T11:59:00.000Z")],
+    },
+  ]);
+
+  const sessions = readRecentOpenCodeSessionsFromDatabasePath(databasePath, Date.parse("2026-05-11T12:00:00.000Z"));
+
+  expect(sessions).toMatchObject([
+    {
+      id: "recent",
+      latestUserText: "recent opencode ask",
+    },
+  ]);
+});
+
 function providerSession(id: string, directory: string, createdAt: string, updatedAt: string) {
   return {
     id,
@@ -227,4 +258,93 @@ function structuredSessionBriefPrompt(provider: string) {
     "",
     "Use only the transcript below.",
   ].join("\n");
+}
+
+function createOpenCodeDatabase(
+  databasePath: string,
+  sessions: Array<{ id: string; updatedAt: string; messages: any[] }>,
+) {
+  fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+  const database = new Database(databasePath);
+  try {
+    database.exec(`
+      create table session (
+        id text primary key,
+        directory text not null,
+        title text not null,
+        time_created integer not null,
+        time_updated integer not null,
+        time_archived integer
+      );
+      create table message (
+        id text primary key,
+        session_id text not null,
+        time_created integer not null,
+        time_updated integer not null,
+        data text not null
+      );
+      create table part (
+        id text primary key,
+        message_id text not null,
+        session_id text not null,
+        time_created integer not null,
+        time_updated integer not null,
+        data text not null
+      );
+    `);
+    const insertSession = database.query(`
+      insert into session (id, directory, title, time_created, time_updated, time_archived)
+      values ($id, $directory, $title, $timeCreated, $timeUpdated, null)
+    `);
+    const insertMessage = database.query(`
+      insert into message (id, session_id, time_created, time_updated, data)
+      values ($id, $sessionId, $timeCreated, $timeUpdated, $data)
+    `);
+    const insertPart = database.query(`
+      insert into part (id, message_id, session_id, time_created, time_updated, data)
+      values ($id, $messageId, $sessionId, $timeCreated, $timeUpdated, $data)
+    `);
+    for (const session of sessions) {
+      const updatedAtMs = new Date(session.updatedAt).getTime();
+      insertSession.run({
+        $id: session.id,
+        $directory: "/repo",
+        $title: session.id,
+        $timeCreated: updatedAtMs,
+        $timeUpdated: updatedAtMs,
+      });
+      for (const [index, msg] of session.messages.entries()) {
+        const messageId = `${session.id}-message-${index}`;
+        const partId = `${messageId}-part`;
+        const createdAtMs = Number(msg.info.time.created);
+        insertMessage.run({
+          $id: messageId,
+          $sessionId: session.id,
+          $timeCreated: createdAtMs,
+          $timeUpdated: createdAtMs,
+          $data: JSON.stringify({ role: msg.info.role }),
+        });
+        insertPart.run({
+          $id: partId,
+          $messageId: messageId,
+          $sessionId: session.id,
+          $timeCreated: createdAtMs,
+          $timeUpdated: createdAtMs,
+          $data: JSON.stringify(msg.parts[0]),
+        });
+      }
+    }
+  } finally {
+    database.close();
+  }
+}
+
+function createTempWorkspace() {
+  const tempPath = fs.mkdtempSync(path.join(os.tmpdir(), "tuiui-opencode-sdk-"));
+  return {
+    path: tempPath,
+    [Symbol.dispose]() {
+      fs.rmSync(tempPath, { recursive: true, force: true });
+    },
+  };
 }

@@ -1524,10 +1524,16 @@ function readRecentCodexSessions() {
 
 async function readRecentAgentSessions(): Promise<RecentAgentSession[]> {
   const nowMs = Date.now();
+  const codexDatabasePath = resolveCodexStateDatabasePathForEnv(process.env);
+  const openCodeDatabasePath = openCodeDatabasePathForEnv(process.env);
+  const claudeConfigDir = claudeConfigDirForEnv(process.env);
+  const claudeSessions = readRecentProviderSessions(async () => await readRecentClaudeSessions(claudeConfigDir, nowMs));
+  // Let the async Claude SDK scan start before the synchronous SQLite readers block the event loop.
+  await Promise.resolve();
   const results = await Promise.all([
-    readRecentProviderSessions(() => readRecentCodexSessionsFromDatabasePath(resolveCodexStateDatabasePathForEnv(process.env), nowMs)),
-    readRecentProviderSessions(() => readRecentOpenCodeSessionsFromDatabasePath(openCodeDatabasePathForEnv(process.env), nowMs)),
-    readRecentProviderSessions(async () => await readRecentClaudeSessions(claudeConfigDirForEnv(process.env), nowMs)),
+    readRecentProviderSessions(() => readRecentCodexSessionsFromDatabasePath(codexDatabasePath, nowMs)),
+    readRecentProviderSessions(() => readRecentOpenCodeSessionsFromDatabasePath(openCodeDatabasePath, nowMs)),
+    claudeSessions,
   ]);
   return results
     .flat()

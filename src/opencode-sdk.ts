@@ -204,6 +204,7 @@ export function readRecentOpenCodeSessionsFromDatabasePath(databasePath: string,
   if (!fs.existsSync(databasePath)) {
     throw new Error(`OpenCode database not found at ${databasePath}`);
   }
+  const cutoffMs = nowMs - 24 * 60 * 60 * 1000;
   const database = new Database(databasePath, { readonly: true, strict: true });
   try {
     const sessions = database.query(`
@@ -215,9 +216,10 @@ export function readRecentOpenCodeSessionsFromDatabasePath(databasePath: string,
         time_updated
       from session
       where time_archived is null
+        and time_updated >= $cutoffMs
       order by time_updated desc
       limit 500
-    `).all() as Array<{
+    `).all({ cutoffMs }) as Array<{
       id: string;
       directory: string;
       title: string;
