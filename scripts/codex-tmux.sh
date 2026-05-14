@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
 
-# Source this Bash-compatible file to make `codex` prefer one live tmux-backed TUI:
+# Source this file to make interactive Codex sessions resumable through tmux:
 #
 #   source /path/to/tuiui/scripts/codex-tmux.sh
 #
-# The wrapper only intercepts interactive Codex entry points. Non-interactive
-# subcommands such as `codex exec`, `codex login`, and `codex app-server` are
-# passed straight through to the real Codex binary.
+# The wrapper keeps a small mapping from Codex session id to tmux session name.
+# A new interactive Codex launch creates a fresh tmux session, then a background
+# watcher reads `session id: ...` from the tmux pane and stores the mapping.
+# Later, `codex resume <session-id>` attaches to the mapped tmux session instead
+# of starting a second Codex process.
 #
-# Useful escape hatches:
+# This intentionally does not try to model the full Codex CLI grammar. It only:
+#
+#   - detects an exact `resume` token and reads the following token as the id
+#   - passes known non-interactive top-level commands straight through
+#   - otherwise treats the invocation as an interactive Codex TUI launch
+#
+# Escape hatches:
 #
 #   CODEX_TMUX=0 codex ...                 # bypass this wrapper once
 #   CODEX_TMUX_CODEX_BIN=/path/to/codex    # pin the real Codex binary
-#   CODEX_TMUX_SESSION_NAME=name codex ... # force a tmux session name once
-#   CODEX_TMUX_PREFIX=codex-work codex ... # customize generated names
-#
-# If a Codex session was originally started outside tmux, this wrapper cannot
-# attach to that existing terminal process. It will create a tmux-backed resume
-# for that thread from this point forward.
+#   CODEX_TMUX_PREFIX=codex-work codex ... # customize generated tmux names
+#   CODEX_TMUX_MAP_FILE=/path/to/map.tsv   # customize the mapping file
 
 __codex_tmux_real_codex() {
   if [[ -n "${CODEX_TMUX_CODEX_BIN:-}" ]]; then
@@ -38,183 +42,22 @@ __codex_tmux_real_codex() {
   return 1
 }
 
-__codex_tmux_flag_takes_value() {
-  case "$1" in
-    -a|--ask-for-approval|\
-    -c|--config|\
-    -C|--cd|\
-    -i|--image|\
-    -m|--model|\
-    -p|--profile|\
-    -s|--sandbox|\
-    --add-dir|\
-    --disable|\
-    --enable|\
-    --local-provider|\
-    --remote|\
-    --remote-auth-token-env)
-      return 0
-      ;;
-  esac
-
-  return 1
-}
-
-__codex_tmux_has_help_or_version() {
-  local arg
-
-  for arg in "$@"; do
-    case "$arg" in
-      -h|--help|-V|--version)
-        return 0
-        ;;
-    esac
-  done
-
-  return 1
-}
-
-__codex_tmux_first_positional() {
-  local arg
-  local skip_next=0
-
-  for arg in "$@"; do
-    if ((skip_next)); then
-      skip_next=0
-      continue
-    fi
-
-    case "$arg" in
-      --)
-        printf '%s\n' "__prompt__"
-        return 0
-        ;;
-      --*=*)
-        continue
-        ;;
-      -*)
-        if __codex_tmux_flag_takes_value "$arg"; then
-          skip_next=1
-        fi
-        continue
-        ;;
-      *)
-        printf '%s\n' "$arg"
-        return 0
-        ;;
-    esac
-  done
-
-  return 1
-}
-
-__codex_tmux_is_passthrough_subcommand() {
-  case "$1" in
-    a|apply|\
-    app|\
-    app-server|\
-    cloud|cloud-tasks|\
-    completion|\
-    debug|\
-    doctor|\
-    e|exec|\
-    exec-server|\
-    execpolicy|\
-    features|\
-    login|logout|\
-    mcp|mcp-server|\
-    plugin|\
-    remote-control|\
-    responses-api-proxy|\
-    review|\
-    sandbox|\
-    stdio-to-uds|\
-    update)
-      return 0
-      ;;
-  esac
-
-  return 1
-}
-
-__codex_tmux_hash() {
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 | awk '{ print substr($1, 1, 12) }'
-    return 0
+__codex_tmux_state_dir() {
+  if [[ -n "${CODEX_TMUX_STATE_DIR:-}" ]]; then
+    printf '%s\n' "$CODEX_TMUX_STATE_DIR"
+  elif [[ -n "${XDG_STATE_HOME:-}" ]]; then
+    printf '%s\n' "$XDG_STATE_HOME/codex-tmux"
+  else
+    printf '%s\n' "$HOME/.local/state/codex-tmux"
   fi
-
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum | awk '{ print substr($1, 1, 12) }'
-    return 0
-  fi
-
-  cksum | awk '{ print $1 }'
 }
 
-__codex_tmux_slug() {
-  local value=${1:-codex}
-
-  value=$(printf '%s' "$value" | tr -c 'A-Za-z0-9_-' '-' | sed 's/^-*//; s/-*$//; s/--*/-/g')
-
-  if [[ -z "$value" ]]; then
-    value=codex
+__codex_tmux_map_file() {
+  if [[ -n "${CODEX_TMUX_MAP_FILE:-}" ]]; then
+    printf '%s\n' "$CODEX_TMUX_MAP_FILE"
+  else
+    printf '%s\n' "$(__codex_tmux_state_dir)/sessions.tsv"
   fi
-
-  printf '%.36s\n' "$value"
-}
-
-__codex_tmux_resume_target() {
-  local arg
-  local saw_resume=0
-  local skip_next=0
-
-  for arg in "$@"; do
-    if ((skip_next)); then
-      skip_next=0
-      continue
-    fi
-
-    if ((!saw_resume)); then
-      case "$arg" in
-        resume)
-          saw_resume=1
-          ;;
-        --*=*)
-          ;;
-        -*)
-          if __codex_tmux_flag_takes_value "$arg"; then
-            skip_next=1
-          fi
-          ;;
-      esac
-      continue
-    fi
-
-    case "$arg" in
-      --)
-        return 1
-        ;;
-      --all|--include-non-interactive|--last|--no-alt-screen|--oss|--search|--strict-config|\
-      --dangerously-bypass-approvals-and-sandbox|--dangerously-bypass-hook-trust|--yolo)
-        continue
-        ;;
-      --*=*)
-        continue
-        ;;
-      -*)
-        if __codex_tmux_flag_takes_value "$arg"; then
-          skip_next=1
-        fi
-        continue
-        ;;
-      *)
-        printf '%s\n' "$arg"
-        return 0
-        ;;
-    esac
-  done
-
-  return 1
 }
 
 __codex_tmux_shell_quote() {
@@ -233,65 +76,217 @@ __codex_tmux_shell_command() {
   printf '\n'
 }
 
-__codex_tmux_session_name() {
-  local kind=$1
-  shift
+__codex_tmux_slug() {
+  local value=${1:-codex}
 
-  if [[ -n "${CODEX_TMUX_SESSION_NAME:-}" ]]; then
-    __codex_tmux_slug "$CODEX_TMUX_SESSION_NAME"
+  value=$(printf '%s' "$value" | tr -c 'A-Za-z0-9_-' '-' | sed 's/^-*//; s/-*$//; s/--*/-/g')
+  if [[ -z "$value" ]]; then
+    value=codex
+  fi
+
+  printf '%.40s\n' "$value"
+}
+
+__codex_tmux_new_session_name() {
+  local prefix=${CODEX_TMUX_PREFIX:-codex}
+  local cwd_name
+  local stamp
+
+  cwd_name=$(__codex_tmux_slug "$(basename "$PWD")")
+  stamp=$(date +%Y%m%d%H%M%S)
+  printf '%s-%s-%s-%s\n' "$prefix" "$cwd_name" "$stamp" "$$"
+}
+
+__codex_tmux_resume_id() {
+  local arg
+  local previous_was_resume=0
+
+  for arg in "$@"; do
+    if ((previous_was_resume)); then
+      case "$arg" in
+        ""|-*)
+          return 1
+          ;;
+        *)
+          printf '%s\n' "$arg"
+          return 0
+          ;;
+      esac
+    fi
+
+    if [[ "$arg" == "resume" ]]; then
+      previous_was_resume=1
+    fi
+  done
+
+  return 1
+}
+
+__codex_tmux_contains_noninteractive_command() {
+  local arg
+
+  for arg in "$@"; do
+    case "$arg" in
+      a|apply|\
+      app|\
+      app-server|\
+      cloud|cloud-tasks|\
+      completion|\
+      debug|\
+      doctor|\
+      e|exec|\
+      exec-server|\
+      execpolicy|\
+      features|\
+      login|logout|\
+      mcp|mcp-server|\
+      plugin|\
+      remote-control|\
+      responses-api-proxy|\
+      review|\
+      sandbox|\
+      stdio-to-uds|\
+      update)
+        return 0
+        ;;
+    esac
+  done
+
+  return 1
+}
+
+__codex_tmux_contains_help_or_version() {
+  local arg
+
+  for arg in "$@"; do
+    case "$arg" in
+      -h|--help|-V|--version)
+        return 0
+        ;;
+    esac
+  done
+
+  return 1
+}
+
+__codex_tmux_lookup_session() {
+  local codex_session_id=$1
+  local map_file
+  local tmux_session
+
+  map_file=$(__codex_tmux_map_file)
+  if [[ ! -f "$map_file" ]]; then
+    return 1
+  fi
+
+  tmux_session=$(awk -F '\t' -v id="$codex_session_id" '$1 == id { session = $2 } END { if (session != "") print session }' "$map_file")
+  if [[ -z "$tmux_session" ]]; then
+    return 1
+  fi
+
+  if tmux has-session -t "$tmux_session" 2>/dev/null; then
+    printf '%s\n' "$tmux_session"
     return 0
   fi
 
-  local prefix=${CODEX_TMUX_PREFIX:-codex}
-  local label
-  local key
-  local hash
+  return 1
+}
 
-  case "$kind" in
-    resume)
-      local target
-      if target=$(__codex_tmux_resume_target "$@"); then
-        label="resume-$target"
-        key="resume:$target"
-      else
-        label="resume-$(basename "$PWD")"
-        key="resume-picker:$PWD"
-      fi
-      ;;
-    fork)
-      label="fork-$(basename "$PWD")"
-      key="fork:$PWD:$*"
-      ;;
-    *)
-      label="$(basename "$PWD")"
-      key="start:$PWD"
-      ;;
-  esac
+__codex_tmux_store_mapping() {
+  local codex_session_id=$1
+  local tmux_session=$2
+  local map_file
 
-  hash=$(printf '%s' "$key" | __codex_tmux_hash)
-  printf '%s-%s-%s\n' "$prefix" "$(__codex_tmux_slug "$label")" "$hash"
+  map_file=$(__codex_tmux_map_file)
+  mkdir -p "$(dirname "$map_file")" || return 1
+  printf '%s\t%s\t%s\t%s\n' "$codex_session_id" "$tmux_session" "$(date +%s)" "$PWD" >> "$map_file"
+}
+
+__codex_tmux_extract_session_id() {
+  local tmux_session=$1
+
+  tmux capture-pane -p -S -200 -t "$tmux_session" 2>/dev/null \
+    | sed -nE 's/.*session[ _-]?id:[[:space:]]*([0-9a-fA-F-]{36}).*/\1/p' \
+    | tail -n 1
+}
+
+__codex_tmux_watch_session_id() {
+  local tmux_session=$1
+  local attempts=${CODEX_TMUX_DISCOVERY_ATTEMPTS:-100}
+  local interval=${CODEX_TMUX_DISCOVERY_INTERVAL:-0.1}
+  local codex_session_id
+  local i=0
+
+  while ((i < attempts)); do
+    if ! tmux has-session -t "$tmux_session" 2>/dev/null; then
+      return 1
+    fi
+
+    codex_session_id=$(__codex_tmux_extract_session_id "$tmux_session")
+    if [[ -n "$codex_session_id" ]]; then
+      __codex_tmux_store_mapping "$codex_session_id" "$tmux_session"
+      return 0
+    fi
+
+    i=$((i + 1))
+    sleep "$interval"
+  done
+
+  return 1
 }
 
 __codex_tmux_attach() {
-  local session_name=$1
+  local tmux_session=$1
 
   if [[ -n "${TMUX:-}" ]]; then
-    tmux switch-client -t "$session_name"
-    return $?
+    tmux switch-client -t "$tmux_session"
+  else
+    tmux attach-session -t "$tmux_session"
   fi
-
-  tmux attach-session -t "$session_name"
 }
 
-__codex_tmux_run_interactive() {
-  local kind=$1
+__codex_tmux_start() {
+  local real_codex=$1
   shift
 
+  local tmux_session
+  local shell_command
+
+  tmux_session=$(__codex_tmux_new_session_name)
+  shell_command=$(__codex_tmux_shell_command "$real_codex" "$@")
+
+  tmux new-session -d -s "$tmux_session" -c "$PWD" "$shell_command" || return $?
+  tmux set-option -q -t "$tmux_session" @codex-tmux-wrapper "1" >/dev/null 2>&1 || true
+  tmux set-option -q -t "$tmux_session" @codex-tmux-cwd "$PWD" >/dev/null 2>&1 || true
+  tmux set-option -q -t "$tmux_session" @codex-tmux-command "$shell_command" >/dev/null 2>&1 || true
+
+  (__codex_tmux_watch_session_id "$tmux_session") >/dev/null 2>&1 &
+  __codex_tmux_attach "$tmux_session"
+}
+
+codex() {
   local real_codex
+  local codex_session_id
+  local tmux_session
+
   real_codex=$(__codex_tmux_real_codex)
   if [[ -z "$real_codex" ]]; then
     printf 'codex-tmux: could not find the real codex binary. Set CODEX_TMUX_CODEX_BIN.\n' >&2
     return 127
+  fi
+
+  if [[ "${CODEX_TMUX:-1}" == "0" ]] \
+    || __codex_tmux_contains_help_or_version "$@" \
+    || __codex_tmux_contains_noninteractive_command "$@"; then
+    "$real_codex" "$@"
+    return $?
+  fi
+
+  if codex_session_id=$(__codex_tmux_resume_id "$@"); then
+    if tmux_session=$(__codex_tmux_lookup_session "$codex_session_id"); then
+      __codex_tmux_attach "$tmux_session"
+      return $?
+    fi
   fi
 
   if ! command -v tmux >/dev/null 2>&1; then
@@ -300,64 +295,5 @@ __codex_tmux_run_interactive() {
     return $?
   fi
 
-  local session_name
-  local command
-
-  session_name=$(__codex_tmux_session_name "$kind" "$@")
-
-  if tmux has-session -t "$session_name" 2>/dev/null; then
-    __codex_tmux_attach "$session_name"
-    return $?
-  fi
-
-  command=$(__codex_tmux_shell_command "$real_codex" "$@")
-  tmux new-session -d -s "$session_name" -c "$PWD" "$command" || return $?
-  tmux set-option -q -t "$session_name" @codex-tmux-wrapper "1" >/dev/null 2>&1 || true
-  tmux set-option -q -t "$session_name" @codex-tmux-cwd "$PWD" >/dev/null 2>&1 || true
-  tmux set-option -q -t "$session_name" @codex-tmux-command "$command" >/dev/null 2>&1 || true
-  __codex_tmux_attach "$session_name"
-}
-
-codex() {
-  local real_codex
-  local first
-
-  real_codex=$(__codex_tmux_real_codex)
-  if [[ -z "$real_codex" ]]; then
-    printf 'codex-tmux: could not find the real codex binary. Set CODEX_TMUX_CODEX_BIN.\n' >&2
-    return 127
-  fi
-
-  if [[ "${CODEX_TMUX:-1}" == "0" ]] || __codex_tmux_has_help_or_version "$@"; then
-    "$real_codex" "$@"
-    return $?
-  fi
-
-  if first=$(__codex_tmux_first_positional "$@"); then
-    case "$first" in
-      resume)
-        __codex_tmux_run_interactive resume "$@"
-        return $?
-        ;;
-      fork)
-        __codex_tmux_run_interactive fork "$@"
-        return $?
-        ;;
-      __prompt__)
-        __codex_tmux_run_interactive start "$@"
-        return $?
-        ;;
-      *)
-        if __codex_tmux_is_passthrough_subcommand "$first"; then
-          "$real_codex" "$@"
-          return $?
-        fi
-
-        __codex_tmux_run_interactive start "$@"
-        return $?
-        ;;
-    esac
-  fi
-
-  __codex_tmux_run_interactive start "$@"
+  __codex_tmux_start "$real_codex" "$@"
 }
