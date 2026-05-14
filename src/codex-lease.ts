@@ -5,20 +5,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { DatabaseSync } from "node:sqlite";
+import { formatCommandLine } from "./command-line.ts";
+import { sessionStorePathForEnv } from "./state-db-path.ts";
 
-type Lease = {
+type SessionProcessOwner = {
   sessionId: string;
   pid: number;
-  cwd: string;
-  tty: string;
-  command: string[];
   startedAtMs: number;
   updatedAtMs: number;
-  source: "tuiui-codex-lease";
-};
-
-type LeaseRegistry = {
-  leases: Lease[];
 };
 
 type SessionDiscovery = {
@@ -33,11 +28,11 @@ export async function runCodexLease(args: string[]) {
     return 127;
   }
 
-  cleanupStaleLeases();
+  cleanupStaleOwners();
 
   const resumeId = findResumeId(args);
   if (resumeId) {
-    await terminateActiveLease(resumeId);
+    await terminateOwnersForRecoveryCommand(formatCommandLine("codex", args));
   }
 
   return runRealCodex(realCodex, args, resumeId);
@@ -59,6 +54,7 @@ function findRealCodex() {
 
 async function runRealCodex(realCodex: string, args: string[], knownSessionId: string) {
   const startedAtMs = Date.now();
+  const launchCommand = formatCommandLine("codex", args);
   const child = spawn(realCodex, args, {
     cwd: process.cwd(),
     env: process.env,
@@ -66,17 +62,13 @@ async function runRealCodex(realCodex: string, args: string[], knownSessionId: s
   });
   const childPid = child.pid || 0;
 
-  const command = [realCodex, ...args];
   if (knownSessionId) {
-    upsertLease({
-      sessionId: knownSessionId,
+    recordRecoverableSessionOwner({
+      command: launchCommand,
       pid: childPid,
-      cwd: process.cwd(),
-      tty: process.env.TTY || "",
-      command,
+      sessionId: knownSessionId,
       startedAtMs,
       updatedAtMs: Date.now(),
-      source: "tuiui-codex-lease",
     });
   }
 
@@ -90,15 +82,12 @@ async function runRealCodex(realCodex: string, args: string[], knownSessionId: s
       startedAtMs,
     }).then((sessionId) => {
       if (sessionId) {
-        upsertLease({
-          sessionId,
+        recordRecoverableSessionOwner({
+          command: launchCommand,
           pid: childPid,
-          cwd: process.cwd(),
-          tty: process.env.TTY || "",
-          command,
+          sessionId,
           startedAtMs,
           updatedAtMs: Date.now(),
-          source: "tuiui-codex-lease",
         });
       }
       return sessionId;
@@ -117,7 +106,7 @@ async function runRealCodex(realCodex: string, args: string[], knownSessionId: s
 
   const sessionId = await discovery;
   if (sessionId) {
-    removeLeaseForPid(sessionId, childPid);
+    removeSessionProcessOwner(sessionId, childPid);
   }
 
   if (result.signal) {
@@ -140,60 +129,126 @@ function findResumeId(args: string[]) {
   return candidate;
 }
 
-async function terminateActiveLease(sessionId: string) {
-  const lease = getActiveLease(sessionId);
-  if (!lease) {
-    return;
-  }
+async function terminateOwnersForRecoveryCommand(recoveryCommand: string) {
+  const owners = getActiveOwnersForRecoveryCommand(recoveryCommand);
 
-  try {
-    process.kill(lease.pid, "SIGTERM");
-  } catch {
-    removeLeaseForPid(sessionId, lease.pid);
-    return;
+  for (const owner of owners) {
+    await terminateOwner(owner);
   }
+}
 
+async function terminateOwner(owner: SessionProcessOwner) {
   const timeoutMs = Number(process.env.TUIUI_CODEX_LEASE_KILL_TIMEOUT_MS || 2_000);
-  const stopped = await waitForPidExit(lease.pid, timeoutMs);
+  try {
+    process.kill(owner.pid, "SIGTERM");
+  } catch {
+    removeSessionProcessOwner(owner.sessionId, owner.pid);
+    return;
+  }
+
+  const stopped = await waitForPidExit(owner.pid, timeoutMs);
   if (!stopped) {
     try {
-      process.kill(lease.pid, "SIGKILL");
+      process.kill(owner.pid, "SIGKILL");
     } catch {
     }
-    await waitForPidExit(lease.pid, 1_000);
+    await waitForPidExit(owner.pid, 1_000);
   }
 
-  removeLeaseForPid(sessionId, lease.pid);
+  removeSessionProcessOwner(owner.sessionId, owner.pid);
 }
 
-function getActiveLease(sessionId: string) {
-  cleanupStaleLeases();
-  return readRegistry().leases.find((lease) => lease.sessionId === sessionId && isProcessAlive(lease.pid));
+function getActiveOwnersForRecoveryCommand(recoveryCommand: string) {
+  cleanupStaleOwners();
+  return withDatabase((database) => database.prepare(`
+    select
+      session_process_owners.session_id as sessionId,
+      session_process_owners.pid,
+      session_process_owners.created_at_ms as startedAtMs,
+      session_process_owners.updated_at_ms as updatedAtMs
+    from session_process_owners
+    inner join session_recovery on session_recovery.session_id = session_process_owners.session_id
+    where session_recovery.recovery_command = ?
+  `).all(recoveryCommand) as SessionProcessOwner[]);
 }
 
-function cleanupStaleLeases() {
-  updateRegistry((registry) => ({
-    leases: registry.leases.filter((lease) => isProcessAlive(lease.pid)),
-  }));
+function cleanupStaleOwners() {
+  withDatabase((database) => {
+    const owners = database.prepare(`
+      select
+        session_id as sessionId,
+        pid,
+        created_at_ms as startedAtMs,
+        updated_at_ms as updatedAtMs
+      from session_process_owners
+    `).all() as SessionProcessOwner[];
+    for (const owner of owners) {
+      if (!isProcessAlive(owner.pid)) {
+        deleteSessionProcessOwner(database, owner.sessionId, owner.pid);
+      }
+    }
+  });
 }
 
-function upsertLease(lease: Lease) {
-  if (!lease.pid) {
+function recordRecoverableSessionOwner(input: {
+  command: string;
+  pid: number;
+  sessionId: string;
+  startedAtMs: number;
+  updatedAtMs: number;
+}) {
+  if (!input.pid) {
     return;
   }
 
-  updateRegistry((registry) => ({
-    leases: [
-      ...registry.leases.filter((candidate) => candidate.sessionId !== lease.sessionId || candidate.pid !== lease.pid),
-      lease,
-    ],
-  }));
+  const recoveryCommand = formatCommandLine("codex", ["resume", input.sessionId]);
+  withDatabase((database) => {
+    database.prepare(`
+      insert into sessions (
+        id,
+        cwd,
+        launch_command,
+        created_at_ms
+      )
+      values (?, ?, ?, ?)
+      on conflict (id) do nothing
+    `).run(input.sessionId, process.cwd(), input.command, input.startedAtMs);
+    database.prepare(`
+      insert into session_recovery (
+        session_id,
+        recovery_command,
+        created_at_ms
+      )
+      values (?, ?, ?)
+      on conflict (session_id) do update set
+        recovery_command = excluded.recovery_command
+    `).run(input.sessionId, recoveryCommand, input.startedAtMs);
+    database.prepare(`
+      insert into session_process_owners (
+        session_id,
+        pid,
+        created_at_ms,
+        updated_at_ms
+      )
+      values (?, ?, ?, ?)
+      on conflict (session_id, pid) do update set
+        updated_at_ms = excluded.updated_at_ms
+    `).run(input.sessionId, input.pid, input.startedAtMs, input.updatedAtMs);
+  });
 }
 
-function removeLeaseForPid(sessionId: string, pid: number) {
-  updateRegistry((registry) => ({
-    leases: registry.leases.filter((lease) => lease.sessionId !== sessionId || lease.pid !== pid),
-  }));
+function removeSessionProcessOwner(sessionId: string, pid: number) {
+  withDatabase((database) => {
+    deleteSessionProcessOwner(database, sessionId, pid);
+  });
+}
+
+function deleteSessionProcessOwner(database: DatabaseSync, sessionId: string, pid: number) {
+  database.prepare(`
+    delete from session_process_owners
+    where session_id = ?
+      and pid = ?
+  `).run(sessionId, pid);
 }
 
 async function discoverSessionIdForChild(params: { childPid: number; cwd: string; startedAtMs: number }) {
@@ -280,54 +335,17 @@ function codexHome() {
   return process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 }
 
-function readRegistry() {
+function withDatabase<T>(useDatabase: (database: DatabaseSync) => T) {
+  const databasePath = sessionStorePathForEnv(process.env);
+  fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+  const database = new DatabaseSync(databasePath);
   try {
-    const parsed = JSON.parse(fs.readFileSync(registryPath(), "utf8")) as LeaseRegistry;
-    return { leases: Array.isArray(parsed.leases) ? parsed.leases : [] };
-  } catch {
-    return { leases: [] };
+    database.exec("pragma foreign_keys = on;");
+    database.exec(fs.readFileSync(path.resolve(import.meta.dirname, "../db/definitions.sql"), "utf8"));
+    return useDatabase(database);
+  } finally {
+    database.close();
   }
-}
-
-function updateRegistry(update: (registry: LeaseRegistry) => LeaseRegistry) {
-  withRegistryLock(() => {
-    const next = update(readRegistry());
-    fs.mkdirSync(path.dirname(registryPath()), { recursive: true });
-    fs.writeFileSync(registryPath(), `${JSON.stringify(next, null, 2)}\n`);
-  });
-}
-
-function withRegistryLock(action: () => void) {
-  const lockPath = `${registryPath()}.lock`;
-  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-  const deadline = Date.now() + 5_000;
-
-  while (true) {
-    try {
-      const fd = fs.openSync(lockPath, "wx");
-      try {
-        action();
-      } finally {
-        fs.closeSync(fd);
-        fs.rmSync(lockPath, { force: true });
-      }
-      return;
-    } catch (error: any) {
-      if (error?.code !== "EEXIST" || Date.now() > deadline) {
-        throw error;
-      }
-      sleepSync(25);
-    }
-  }
-}
-
-function registryPath() {
-  if (process.env.TUIUI_CODEX_LEASES_PATH) {
-    return process.env.TUIUI_CODEX_LEASES_PATH;
-  }
-
-  const stateHome = process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state");
-  return path.join(stateHome, "tuiui", "codex-leases.json");
 }
 
 function isProcessAlive(pid: number) {
@@ -368,8 +386,4 @@ function signalNumber(signal: NodeJS.Signals) {
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function sleepSync(ms: number) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }

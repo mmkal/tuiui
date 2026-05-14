@@ -51,3 +51,24 @@ on conflict (session_id) do update set
 update sessions
 set archived_at_ms = :archivedAtMs
 where id = :sessionId;
+
+/** @name recordSessionProcessOwner */
+insert into session_process_owners (
+  session_id,
+  pid,
+  created_at_ms,
+  updated_at_ms
+)
+values (
+  :sessionId,
+  :pid,
+  :createdAtMs,
+  :updatedAtMs
+)
+on conflict (session_id, pid) do update set
+  updated_at_ms = excluded.updated_at_ms;
+
+/** @name removeSessionProcessOwner */
+delete from session_process_owners
+where session_id = :sessionId
+  and pid = :pid;

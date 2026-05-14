@@ -170,3 +170,66 @@ export namespace archiveSession {
 		sessionId: string;
 	};
 }
+
+const recordSessionProcessOwnerSql = `
+insert into session_process_owners (
+  session_id,
+  pid,
+  created_at_ms,
+  updated_at_ms
+)
+values (
+  ?,
+  ?,
+  ?,
+  ?
+)
+on conflict (session_id, pid) do update set
+  updated_at_ms = excluded.updated_at_ms;
+`.trim();
+const recordSessionProcessOwnerQuery = (params: recordSessionProcessOwner.Params) => ({
+	name: "recordSessionProcessOwner",
+	sql: recordSessionProcessOwnerSql,
+	args: [params.sessionId, params.pid, params.createdAtMs, params.updatedAtMs],
+});
+
+export const recordSessionProcessOwner = Object.assign(
+	function recordSessionProcessOwner(client: SyncClient, params: recordSessionProcessOwner.Params) {
+		return client.run(recordSessionProcessOwnerQuery(params));
+	},
+	{ sql: recordSessionProcessOwnerSql, query: recordSessionProcessOwnerQuery },
+);
+
+export namespace recordSessionProcessOwner {
+	export type Params = {
+		sessionId: string;
+		pid: number;
+		createdAtMs: number;
+		updatedAtMs: number;
+	};
+}
+
+const removeSessionProcessOwnerSql = `
+delete from session_process_owners
+where session_id = ?
+  and pid = ?;
+`.trim();
+const removeSessionProcessOwnerQuery = (params: removeSessionProcessOwner.Params) => ({
+	name: "removeSessionProcessOwner",
+	sql: removeSessionProcessOwnerSql,
+	args: [params.sessionId, params.pid],
+});
+
+export const removeSessionProcessOwner = Object.assign(
+	function removeSessionProcessOwner(client: SyncClient, params: removeSessionProcessOwner.Params) {
+		return client.run(removeSessionProcessOwnerQuery(params));
+	},
+	{ sql: removeSessionProcessOwnerSql, query: removeSessionProcessOwnerQuery },
+);
+
+export namespace removeSessionProcessOwner {
+	export type Params = {
+		sessionId: string;
+		pid: number;
+	};
+}

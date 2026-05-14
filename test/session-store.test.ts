@@ -1,4 +1,8 @@
 import { expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { formatCommandLine, parseCommandLine } from "../src/command-line.ts";
 import { createSessionStore } from "../src/session-store.ts";
 
@@ -69,3 +73,63 @@ test("formats recovery commands so they can be parsed again", () => {
     args: ["resume", "thread with spaces"],
   });
 });
+
+test("records and removes active session process owners", () => {
+  using fixture = createFileBackedStore();
+
+  fixture.store.recordSession({
+    id: "owner_session",
+    cwd: "/tmp/tuiui-store",
+    launchCommand: "codex",
+    createdAtMs: 1_000,
+  });
+  fixture.store.setSessionRecovery({
+    sessionId: "owner_session",
+    recoveryCommand: "codex resume owner_session",
+    createdAtMs: 2_000,
+  });
+  fixture.store.recordSessionProcessOwner({
+    sessionId: "owner_session",
+    pid: 123,
+    createdAtMs: 3_000,
+    updatedAtMs: 3_000,
+  });
+
+  expect(fixture.ownerRows()).toEqual([
+    {
+      created_at_ms: 3_000,
+      pid: 123,
+      session_id: "owner_session",
+      updated_at_ms: 3_000,
+    },
+  ]);
+
+  fixture.store.removeSessionProcessOwner({
+    sessionId: "owner_session",
+    pid: 123,
+  });
+
+  expect(fixture.ownerRows()).toEqual([]);
+});
+
+function createFileBackedStore() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tuiui-session-store-"));
+  const databasePath = path.join(root, "state.sqlite");
+  const store = createSessionStore(databasePath);
+
+  return {
+    store,
+    ownerRows() {
+      const database = new Database(databasePath);
+      try {
+        return database.query("select * from session_process_owners order by session_id, pid").all();
+      } finally {
+        database.close();
+      }
+    },
+    [Symbol.dispose]() {
+      store.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    },
+  };
+}

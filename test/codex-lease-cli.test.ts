@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -18,14 +19,14 @@ test("codex resume terminates the existing wrapper-owned session before starting
       FAKE_CODEX_TERMINATED_PATH: fixture.firstTerminatedPath,
       REALCODEX: fixture.codexPath,
       TUIUI_CODEX_LEASE_DISCOVERY_INTERVAL_MS: "25",
-      TUIUI_CODEX_LEASES_PATH: fixture.leasesPath,
+      TUIUI_STATE_DB: fixture.stateDb,
     },
     stdio: "ignore",
   });
 
   try {
     await waitForFile(fixture.firstStartedPath);
-    await waitForLease(fixture.leasesPath, sessionId);
+    await waitForLease(fixture.stateDb, sessionId);
 
     const resumed = spawnSync("node", [path.resolve("bin/tuiui.ts"), "codex", "resume", sessionId], {
       cwd: fixture.workspace,
@@ -37,7 +38,7 @@ test("codex resume terminates the existing wrapper-owned session before starting
         FAKE_CODEX_TERMINATED_PATH: fixture.firstTerminatedPath,
         REALCODEX: fixture.codexPath,
         TUIUI_CODEX_LEASE_KILL_TIMEOUT_MS: "500",
-        TUIUI_CODEX_LEASES_PATH: fixture.leasesPath,
+        TUIUI_STATE_DB: fixture.stateDb,
       },
     });
 
@@ -63,7 +64,7 @@ test("codex command forwards unknown Codex flags instead of treating them as tui
       ...process.env,
       FAKE_CODEX_RECORD_ARGS_PATH: fixture.recordArgsPath,
       REALCODEX: fixture.codexPath,
-      TUIUI_CODEX_LEASES_PATH: fixture.leasesPath,
+      TUIUI_STATE_DB: fixture.stateDb,
     },
   });
 
@@ -84,9 +85,9 @@ function createFakeCodexFixture() {
     codexPath,
     firstStartedPath: path.join(root, "first-started.json"),
     firstTerminatedPath: path.join(root, "first-terminated.json"),
-    leasesPath: path.join(root, "leases.json"),
     recordArgsPath: path.join(root, "record-args.json"),
     resumedPath: path.join(root, "resumed.json"),
+    stateDb: path.join(root, "tuiui.sqlite"),
     workspace,
     [Symbol.dispose]() {
       fs.rmSync(root, { recursive: true, force: true });
@@ -94,16 +95,35 @@ function createFakeCodexFixture() {
   };
 }
 
-async function waitForLease(leasesPath: string, sessionId: string) {
+async function waitForLease(stateDb: string, sessionId: string) {
   const lease = await poll(() => {
-    if (!fs.existsSync(leasesPath)) {
+    if (!fs.existsSync(stateDb)) {
       return null;
     }
 
-    const registry = JSON.parse(fs.readFileSync(leasesPath, "utf8")) as any;
-    return registry.leases.find((candidate: any) => candidate.sessionId === sessionId);
+    const database = new Database(stateDb);
+    try {
+      return database.query(`
+        select
+          session_process_owners.session_id as sessionId,
+          session_process_owners.pid,
+          session_recovery.recovery_command as recoveryCommand,
+          sessions.cwd
+        from session_process_owners
+        inner join session_recovery on session_recovery.session_id = session_process_owners.session_id
+        inner join sessions on sessions.id = session_process_owners.session_id
+        where session_process_owners.session_id = ?
+        limit 1
+      `).get(sessionId) as any;
+    } finally {
+      database.close();
+    }
   });
-  expect(lease).toMatchObject({ sessionId });
+  expect(lease).toMatchObject({
+    cwd: fs.realpathSync(path.join(path.dirname(stateDb), "workspace")),
+    recoveryCommand: `codex resume ${sessionId}`,
+    sessionId,
+  });
 }
 
 async function waitForFile(filePath: string) {
