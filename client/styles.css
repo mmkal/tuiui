@@ -56,6 +56,19 @@ button:disabled {
   opacity: 0.48;
 }
 
+.primary-button {
+  display: inline-grid;
+  place-items: center;
+  min-height: 34px;
+  border: 1px solid #3d4652;
+  border-radius: 7px;
+  background: #d8f36a;
+  color: #111418;
+  font-weight: 700;
+  padding: 0 11px;
+  text-decoration: none;
+}
+
 .layout {
   min-height: 0;
   height: 100dvh;
@@ -2228,7 +2241,7 @@ textarea[data-label="promptbox"][data-overflowing="true"] {
   }
 
   .toast-viewport {
-    top: calc(max(8px, env(safe-area-inset-top)) + 40px);
+    top: calc(max(8px, env(safe-area-inset-top)) + 68px);
     right: 10px;
     bottom: auto;
     left: 10px;

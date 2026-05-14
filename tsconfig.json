@@ -11,6 +11,14 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["bun-shim.d.ts", "cli.ts", "src/**/*.ts", "client/**/*.ts", "spec/**/*.ts", "test/**/*.ts", "playwright.config.ts"]
+  "include": [
+    "bun-shim.d.ts",
+    "cli.ts",
+    "bin/**/*.ts",
+    "src/**/*.ts",
+    "client/**/*.ts",
+    "spec/**/*.ts",
+    "test/**/*.ts",
+    "playwright.config.ts"
+  ]
 }
-

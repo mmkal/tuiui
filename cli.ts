@@ -3,6 +3,7 @@
 // for the session browser and command/chord interaction ideas.
 import * as fs from "node:fs";
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -72,6 +73,17 @@ import {
 } from "./src/tmux-backend.ts";
 import { renderTerminalShotSvg } from "./src/tuishot.ts";
 import { createSessionStoreForEnv, type SessionStore } from "./src/session-store.ts";
+import {
+  buildCoordinatorAgents,
+  buildCoordinatorBriefing,
+  findCoordinatorClashes,
+  findExplicitPromptAgentTargets,
+  managedCoordinatorAgentSource,
+  recentCodexCoordinatorAgentSource,
+  type CoordinatorAgent,
+  type CoordinatorAgentSource,
+} from "./src/coordinator-tools.ts";
+import { handleCoordinatorMcpRequest, type CoordinatorMcpHandlers } from "./src/coordinator-mcp.ts";
 
 if (typeof Bun === "undefined") {
   throw new Error("tuiui requires the Bun runtime. Run `bun run cli.ts ...`.");
@@ -188,6 +200,7 @@ type CreateSessionInput = {
   fakeAgent: AgentName | "";
   backend: SessionBackendName;
   launchCommand: string;
+  coordinator: boolean;
 };
 
 type ServerState = {
@@ -195,6 +208,20 @@ type ServerState = {
   nextStdoutEventId: number;
   nextStdinEventId: number;
   sessionStore: SessionStore;
+  coordinator: CoordinatorState;
+};
+
+type CoordinatorState = {
+  sessionId: string;
+  mcpToken: string;
+  subscriptions: Map<string, CoordinatorSubscription>;
+  lastAgentStatuses: Map<string, SessionStatus>;
+  consumedPromptAgentGrants: Set<string>;
+};
+
+type CoordinatorSubscription = {
+  agentId: string;
+  createdAt: string;
 };
 
 const loopbackHost = "127.0.0.1";
@@ -217,6 +244,7 @@ const createSessionBodySchema = z.object({
   rows: z.number().optional(),
   fakeAgent: z.string().optional(),
   backend: z.string().optional(),
+  coordinator: z.boolean().optional(),
 });
 const sessionIdInputSchema = z.object({ sessionId: z.string() });
 const sendSessionInputSchema = sessionIdInputSchema.extend({
@@ -243,6 +271,7 @@ type CommandPresetPayload = {
   command: string;
   args: string[];
   fakeAgent: string;
+  coordinator?: boolean;
 };
 
 const cli = parseCliArgs(process.argv.slice(2));
@@ -251,6 +280,7 @@ const state: ServerState = {
   nextStdoutEventId: 1,
   nextStdinEventId: 1,
   sessionStore: createSessionStoreForEnv(process.env),
+  coordinator: createCoordinatorState(),
 };
 const server: ReturnType<typeof Bun.serve> = startServer({ host: cli.host, port: cli.port, state });
 const serverPort = Number(server.port || cli.port);
@@ -270,6 +300,7 @@ if (cli.rest.length > 0) {
     fakeAgent: cli.fakeAgent,
     backend: cli.backend,
     launchCommand: formatCommandLine(command || "", args),
+    coordinator: false,
   });
   const sessionUrls = accessBaseUrls.map((url) => `${url}/sessions/${session.id}`);
   process.stdout.write(`${sessionUrls.join("\n")}\n`);
@@ -305,6 +336,12 @@ function startServer(options: { host: string; port: number; state: ServerState }
     },
     async fetch(request): Promise<Response> {
       const url = new URL(request.url);
+      if (url.pathname === "/mcp/coordinator") {
+        if (!authorizedCoordinatorMcpRequest(options.state, request)) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+        return await handleCoordinatorMcpRequest(request, createCoordinatorMcpHandlers(options.state));
+      }
       const rpc = await rpcHandler.handle(request, {
         prefix: "/rpc",
         context: {},
@@ -483,6 +520,7 @@ function cwdPayload() {
 function commandPresetsPayload(): CommandPresetPayload[] {
   return [
     { id: "custom", label: "Custom", command: "", args: [], fakeAgent: "" },
+    { id: "coordinator", label: "Coordinator", command: "codex", args: coordinatorCodexArgs(), fakeAgent: "", coordinator: true },
     { id: "opencode", label: "OpenCode", command: "opencode", args: [], fakeAgent: "" },
     { id: "codex", label: "Codex", command: "codex", args: [], fakeAgent: "" },
     { id: "claude", label: "Claude", command: "claude", args: [], fakeAgent: "" },
@@ -493,6 +531,211 @@ function commandPresetsPayload(): CommandPresetPayload[] {
   ];
 }
 
+function createCoordinatorState(): CoordinatorState {
+  return {
+    sessionId: "",
+    mcpToken: process.env.TUIUI_COORDINATOR_MCP_TOKEN || randomBytes(32).toString("hex"),
+    subscriptions: new Map(),
+    lastAgentStatuses: new Map(),
+    consumedPromptAgentGrants: new Set(),
+  };
+}
+
+function createCoordinatorMcpHandlers(state: ServerState): CoordinatorMcpHandlers {
+  return {
+    listAgents: () => listCoordinatorAgents(state),
+    getBriefing: (agentId) => coordinatorBriefingById(state, agentId),
+    promptAgent: async (agentId, prompt) => await coordinatorPromptAgent(state, agentId, prompt),
+    subscribe: (agentId) => coordinatorSubscribeAgent(state, agentId),
+    findClashes: () => findCoordinatorClashes(listCoordinatorAgents(state)),
+  };
+}
+
+function authorizedCoordinatorMcpRequest(state: ServerState, request: Request) {
+  const header = request.headers.get("authorization") || "";
+  return header === `Bearer ${state.coordinator.mcpToken}`;
+}
+
+function coordinatorCodexArgs() {
+  return [
+    "-c",
+    `mcp_servers.tuiui_coordinator.url="${baseUrl}/mcp/coordinator"`,
+    "-c",
+    `mcp_servers.tuiui_coordinator.bearer_token_env_var="TUIUI_COORDINATOR_MCP_TOKEN"`,
+    "-c",
+    `mcp_servers.tuiui_coordinator.enabled_tools=["listAgents","getBriefing","promptAgent","subscribe","findClashes"]`,
+    "-c",
+    "mcp_servers.tuiui_coordinator.tool_timeout_sec=20",
+    "-c",
+    "mcp_servers.tuiui_coordinator.required=true",
+    "--sandbox",
+    "read-only",
+    "--ask-for-approval",
+    "on-request",
+    createCoordinatorInitialPrompt(),
+  ];
+}
+
+function createCoordinatorInitialPrompt() {
+  return [
+    "You are TUI UI's coordinator agent. You are a normal Codex session rendered in TUI UI, but you have extra MCP tools for supervising other agents.",
+    "Use listAgents and findClashes before answering broad status or clash questions. Use getBriefing when an agent needs more detail.",
+    "Only call promptAgent when the human explicitly asks you to tell, ask, prompt, message, or send something to a specific agent. The server will reject promptAgent if the latest human prompt did not authorize that target.",
+    "Subscribe to an agent when the human wants you to monitor it. When TUI UI sends you an idle-event prompt, update your situational awareness; do not prompt worker agents just because an idle event arrived.",
+    "You may inspect, brief, subscribe, and forward user-visible prompts. Do not kill, archive, rebase, merge, push, close PRs, rewrite history, or perform destructive coordination.",
+  ].join("\n\n");
+}
+
+function listCoordinatorAgents(state: ServerState): CoordinatorAgent[] {
+  return buildCoordinatorAgents(listCoordinatorAgentSources(state));
+}
+
+function listCoordinatorAgentSources(state: ServerState): CoordinatorAgentSource[] {
+  const managedSources = [...state.sessions.values()]
+    .filter((session) =>
+      session.id !== state.coordinator.sessionId &&
+      !session.archivedAtMs &&
+      !state.sessionStore.getSession(session.id)?.archivedAtMs
+    )
+    .map((session) => managedCoordinatorAgentSource({
+      id: session.id,
+      title: sessionDisplayTitle(session),
+      command: session.command,
+      args: session.args,
+      cwd: session.cwd,
+      status: runtimeSessionStatus(session),
+      lifecycle: session.lifecycle,
+      updatedAt: session.updatedAt,
+      lastOutputAt: session.lastOutputAt,
+      routePath: `/sessions/${session.id}`,
+      sdk: session.sdk,
+      semanticPrompt: session.semantic.prompt,
+    }));
+  const managedCodexIds = new Set(managedSources
+    .map((source) => source.sdk?.externalSessionId || "")
+    .filter(Boolean));
+  return [
+    ...managedSources,
+    ...safeRecentCodexSessions()
+      .filter((session) => !managedCodexIds.has(session.id))
+      .map(recentCodexCoordinatorAgentSource),
+  ].sort((left, right) => Date.parse(right.lastOutputAt || right.updatedAt) - Date.parse(left.lastOutputAt || left.updatedAt));
+}
+
+function coordinatorBriefingById(state: ServerState, agentId: string) {
+  const source = coordinatorSourceById(state, agentId);
+  const agent = listCoordinatorAgents(state).find((candidate) => candidate.id === agentId);
+  if (!source || !agent) {
+    throw new Error(`Unknown agent: ${agentId}`);
+  }
+  return buildCoordinatorBriefing(source, agent);
+}
+
+async function coordinatorPromptAgent(state: ServerState, agentId: string, prompt: string) {
+  const session = state.sessions.get(agentId);
+  if (!session || session.archivedAtMs || session.lifecycle !== "running") {
+    throw new Error(`Agent is not a live managed session: ${agentId}`);
+  }
+  if (agentId === state.coordinator.sessionId) {
+    throw new Error("The coordinator cannot prompt itself");
+  }
+  const authorization = coordinatorLatestPromptAgentAuthorization(state, agentId);
+  if (!authorization) {
+    throw new Error(`promptAgent is not authorized for ${agentId} by the coordinator session's latest human prompt`);
+  }
+  if (state.coordinator.consumedPromptAgentGrants.has(authorization.grantKey)) {
+    throw new Error(`promptAgent authorization for ${agentId} has already been used for the coordinator session's latest human prompt`);
+  }
+  const text = String(prompt || "").trim();
+  if (!text) {
+    throw new Error("prompt is required");
+  }
+  await sendToSession(state, session, text, true);
+  state.coordinator.consumedPromptAgentGrants.add(authorization.grantKey);
+  const createdAt = new Date().toISOString();
+  return {
+    ok: true,
+    agentId,
+    prompt: text,
+    message: `Prompt sent to ${sessionDisplayTitle(session)}.`,
+    createdAt,
+  };
+}
+
+function coordinatorSubscribeAgent(state: ServerState, agentId: string) {
+  const source = coordinatorSourceById(state, agentId);
+  if (!source) {
+    throw new Error(`Unknown agent: ${agentId}`);
+  }
+  if (agentId === state.coordinator.sessionId) {
+    throw new Error("The coordinator cannot subscribe to itself");
+  }
+  const session = state.sessions.get(agentId);
+  if (!session || session.archivedAtMs || session.lifecycle !== "running") {
+    throw new Error(`Agent is not a running managed session and cannot emit idle events: ${agentId}`);
+  }
+  const createdAt = new Date().toISOString();
+  state.coordinator.subscriptions.set(agentId, { agentId, createdAt });
+  state.coordinator.lastAgentStatuses.set(agentId, runtimeSessionStatus(session));
+  scheduleCoordinatorIdleCheck(state, session);
+  return {
+    ok: true,
+    agentId,
+    message: `Subscribed to ${agentId}.`,
+    createdAt,
+  };
+}
+
+function coordinatorSourceById(state: ServerState, agentId: string) {
+  return listCoordinatorAgentSources(state).find((source) => source.id === agentId) || null;
+}
+
+function safeRecentCodexSessions() {
+  try {
+    return readRecentCodexSessions();
+  } catch {
+    return [];
+  }
+}
+
+function runtimeSessionStatus(session: RuntimeSession): SessionStatus {
+  if (session.lifecycle === "exited") {
+    return "exited";
+  }
+  return Date.now() - new Date(session.lastOutputAt).getTime() < idleThresholdMs ? "busy" : "idle";
+}
+
+async function queueCoordinatorEventPrompt(state: ServerState, prompt: string) {
+  const coordinator = state.sessions.get(state.coordinator.sessionId);
+  if (!coordinator || coordinator.archivedAtMs || coordinator.lifecycle !== "running") {
+    return;
+  }
+  await sendToSession(state, coordinator, createCoordinatorEventPrompt(prompt), true);
+}
+
+function createCoordinatorEventPrompt(prompt: string) {
+  return [
+    "[tuiui coordinator event]",
+    prompt,
+    "Use getBriefing for this agent if you need details. Do not call promptAgent unless the latest human prompt explicitly asked you to forward a message to that exact agent.",
+  ].join("\n\n");
+}
+
+function coordinatorLatestPromptAgentAuthorization(state: ServerState, agentId: string) {
+  const coordinator = state.sessions.get(state.coordinator.sessionId);
+  if (!coordinator) {
+    return null;
+  }
+  const latestPrompt = [...coordinator.stdinEvents].reverse().find((event) => Boolean(event.text.trim()));
+  if (!latestPrompt) {
+    return null;
+  }
+  if (!findExplicitPromptAgentTargets(listCoordinatorAgents(state), latestPrompt.text).includes(agentId)) {
+    return null;
+  }
+  return { grantKey: `${latestPrompt.id}:${agentId}` };
+}
+
 function sessionsListPayload(state: ServerState) {
   return [...state.sessions.values()]
     .filter((session) => !session.archivedAtMs && !state.sessionStore.getSession(session.id)?.archivedAtMs)
@@ -500,19 +743,25 @@ function sessionsListPayload(state: ServerState) {
 }
 
 async function createSessionPayload(body: CreateSessionBody) {
-  const command = body.command || "";
-  const args = Array.isArray(body.args) ? body.args.map(String) : [];
+  const coordinator = body.coordinator === true;
+  const command = coordinator ? "codex" : body.command || "";
+  const args = coordinator ? coordinatorCodexArgs() : Array.isArray(body.args) ? body.args.map(String) : [];
+  const env = body.env || {};
+  if (coordinator) {
+    env.TUIUI_COORDINATOR_MCP_TOKEN = state.coordinator.mcpToken;
+  }
   const session = await createSession({
     id: createSessionId(),
     command,
     args,
     cwd: body.cwd || process.cwd(),
-    env: body.env || {},
+    env,
     cols: Number(body.cols || defaultCols),
     rows: Number(body.rows || defaultRows),
     fakeAgent: isAgentName(body.fakeAgent) ? body.fakeAgent : "",
     backend: resolveBackendForLaunch(body.backend),
     launchCommand: formatCommandLine(command, args),
+    coordinator,
   });
   return { id: session.id, url: `${baseUrl}/sessions/${session.id}` };
 }
@@ -579,6 +828,7 @@ async function recoverStoredSessionPayload(state: ServerState, sessionId: string
     fakeAgent: "",
     backend: resolveBackendForLaunch(""),
     launchCommand: storedSession.launchCommand,
+    coordinator: false,
   });
   return { id: session.id, url: `${baseUrl}/sessions/${session.id}` };
 }
@@ -785,7 +1035,7 @@ async function createSession(input: CreateSessionInput) {
 
   const session: RuntimeSession = {
     id,
-    title: path.basename(command),
+    title: input.coordinator ? "coordinator" : path.basename(command),
     command,
     args,
     cwd,
@@ -821,6 +1071,9 @@ async function createSession(input: CreateSessionInput) {
   };
 
   state.sessions.set(id, session);
+  if (input.coordinator) {
+    state.coordinator.sessionId = id;
+  }
   state.sessionStore.recordSession({
     id,
     cwd,
@@ -843,6 +1096,7 @@ async function createSession(input: CreateSessionInput) {
       session.writeQueue = session.writeQueue.then(() => appendOutput(state, session, text));
     },
   });
+  recordSessionProcessOwnerIfRecoverable(session);
 
   session.backend.exited.then((exitCode: number | null) => {
     session.writeQueue = session.writeQueue
@@ -856,6 +1110,7 @@ async function createSession(input: CreateSessionInput) {
         session.exitCode = exitCode;
         session.updatedAt = new Date().toISOString();
         await session.fakeAgent?.[Symbol.asyncDispose]();
+        removeSessionProcessOwner(session);
         publishSession(session);
       })
       .catch((error: unknown) => {
@@ -1056,6 +1311,7 @@ async function appendOutput(state: ServerState, session: RuntimeSession, chunk: 
     createdAt: now,
   });
   state.nextStdoutEventId += 1;
+  scheduleCoordinatorIdleCheck(state, session);
   if (session.redrawGate.active) {
     scheduleRedrawGateFlush(session);
     return;
@@ -1230,10 +1486,38 @@ async function killSession(session: RuntimeSession) {
 
 function publishSession(session: RuntimeSession) {
   const payload = getSessionPayload(session);
+  observeCoordinatorSessionStatus(state, session, payload);
   scheduleIdleStatusPublish(session, payload);
   for (const subscriber of session.subscribers) {
     subscriber(payload);
   }
+}
+
+function scheduleCoordinatorIdleCheck(state: ServerState, session: RuntimeSession) {
+  if (!state.coordinator.subscriptions.has(session.id)) {
+    return;
+  }
+  setTimeout(() => {
+    if (!state.sessions.has(session.id) || session.lifecycle !== "running") {
+      return;
+    }
+    const payload = getSessionPayload(session);
+    observeCoordinatorSessionStatus(state, session, payload);
+  }, idleThresholdMs + 100);
+}
+
+function observeCoordinatorSessionStatus(state: ServerState, session: RuntimeSession, payload: SessionPayload) {
+  const previous = state.coordinator.lastAgentStatuses.get(session.id);
+  state.coordinator.lastAgentStatuses.set(session.id, payload.status);
+  if (
+    previous !== "busy" ||
+    payload.status !== "idle" ||
+    !state.coordinator.subscriptions.has(session.id)
+  ) {
+    return;
+  }
+  const text = `Agent ${payload.id} (${payload.title}) went idle. Latest task: ${payload.sdk.summary?.latestUserText || payload.semantic.prompt || payload.command}`;
+  void queueCoordinatorEventPrompt(state, text);
 }
 
 function scheduleIdleStatusPublish(session: RuntimeSession, payload: SessionPayload) {
@@ -1293,11 +1577,7 @@ function streamSessionEvents(session: RuntimeSession) {
 }
 
 function getSessionPayload(session: RuntimeSession): SessionPayload {
-  const status = session.lifecycle === "exited"
-    ? "exited"
-    : Date.now() - new Date(session.lastOutputAt).getTime() < idleThresholdMs
-      ? "busy"
-      : "idle";
+  const status = runtimeSessionStatus(session);
   const latestEventId = latestStdoutEventId(session);
   const suppressRedrawOutput = session.redrawGate.active;
   const emptyTerminal = suppressRedrawOutput
@@ -1815,6 +2095,43 @@ function storeSessionRecoveryCommand(session: RuntimeSession, args: string[]) {
     recoveryCommand: formatCommandLine(session.command, args),
     createdAtMs: Date.now(),
   });
+  recordSessionProcessOwnerIfRecoverable(session);
+}
+
+function recordSessionProcessOwnerIfRecoverable(session: RuntimeSession) {
+  const pid = sessionBackendPid(session);
+  if (!pid || !state.sessionStore.getSession(session.id)?.recoveryCommand) {
+    return;
+  }
+
+  const now = Date.now();
+  state.sessionStore.recordSessionProcessOwner({
+    sessionId: session.id,
+    pid,
+    createdAtMs: now,
+    updatedAtMs: now,
+  });
+}
+
+function removeSessionProcessOwner(session: RuntimeSession) {
+  const pid = sessionBackendPid(session);
+  if (!pid) {
+    return;
+  }
+
+  state.sessionStore.removeSessionProcessOwner({
+    sessionId: session.id,
+    pid,
+  });
+}
+
+function sessionBackendPid(session: RuntimeSession) {
+  if (session.backend.name !== "bun") {
+    return 0;
+  }
+
+  const pid = session.backend.process?.pid;
+  return typeof pid === "number" ? pid : 0;
 }
 
 async function refreshCodexSessionSdk(session: RuntimeSession) {

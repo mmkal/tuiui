@@ -1,5 +1,4 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
 import { createNodeSqliteClient, type SyncClient } from "sqlfu";
@@ -8,8 +7,11 @@ import {
   getSession,
   getSessionRecovery,
   recordSession,
+  recordSessionProcessOwner,
+  removeSessionProcessOwner,
   setSessionRecovery,
 } from "../db/sql/.generated/queries.sql.ts";
+import { sessionStorePathForEnv } from "./state-db-path.ts";
 
 export type SessionStore = ReturnType<typeof createSessionStore>;
 
@@ -41,15 +43,20 @@ export type ArchiveStoredSessionInput = {
   archivedAtMs: number;
 };
 
-const definitionsPath = path.resolve(import.meta.dirname, "../db/definitions.sql");
+export type RecordSessionProcessOwnerInput = {
+  sessionId: string;
+  pid: number;
+  createdAtMs: number;
+  updatedAtMs: number;
+};
 
-export function sessionStorePathForEnv(env: NodeJS.ProcessEnv) {
-  if (env.TUIUI_STATE_DB) {
-    return path.resolve(env.TUIUI_STATE_DB);
-  }
-  const stateHome = env.XDG_STATE_HOME || path.join(String(env.HOME || os.homedir()), ".local", "state");
-  return path.join(stateHome, "tuiui", "tuiui.sqlite");
-}
+export type RemoveSessionProcessOwnerInput = {
+  sessionId: string;
+  pid: number;
+};
+
+const definitionsPath = path.resolve(import.meta.dirname, "../db/definitions.sql");
+export { sessionStorePathForEnv };
 
 export function createSessionStoreForEnv(env: NodeJS.ProcessEnv) {
   return createSessionStore(sessionStorePathForEnv(env));
@@ -70,6 +77,12 @@ export function createSessionStore(databasePath: string) {
     },
     setSessionRecovery(input: SetStoredSessionRecoveryInput) {
       setSessionRecovery(client, input);
+    },
+    recordSessionProcessOwner(input: RecordSessionProcessOwnerInput) {
+      recordSessionProcessOwner(client, input);
+    },
+    removeSessionProcessOwner(input: RemoveSessionProcessOwnerInput) {
+      removeSessionProcessOwner(client, input);
     },
     archiveSession(input: ArchiveStoredSessionInput) {
       archiveSession(client, { archivedAtMs: input.archivedAtMs }, { sessionId: input.sessionId });
