@@ -5,7 +5,7 @@ size: large
 
 # Meta-Agent With Tools
 
-Status: Implementation in progress. The deterministic coordination functions, MCP tool wrapper, server-side coordinator state/routes, idle-event subscription hook, and browser coordinator route are in place. Focused deterministic/MCP tests and typecheck pass. Remaining work is server/browser integration coverage, full verification, PR body update, and moving the task to complete.
+Status: Implementation complete pending final PR housekeeping. The deterministic coordination functions, MCP wrapper, server coordinator state/routes, idle-event subscription hook, browser coordinator route, API coverage, and Playwright route coverage are in place. Focused verification is green; remaining work is moving the task to complete and updating the PR body.
 
 ## Goal
 
@@ -53,9 +53,9 @@ The coordinator may inspect, brief, subscribe, and send prompts to managed sessi
 - [x] Add a browser `/coordinator` chat surface and Home entry point. _`client/app.ts` and `client/styles.css` add a Home coordinator entry and a responsive coordinator chat/sidebar route._
 - [x] Wire subscribed busy-to-idle transitions to coordinator event injection without auto-prompting worker agents. _Subscribed managed sessions schedule an idle check and inject an event prompt into the coordinator queue on a busy-to-idle transition._
 - [x] Add unit tests for deterministic coordination functions and clash detection. _Added `test/coordinator-tools.test.ts` and `test/coordinator-mcp.test.ts`; both pass._
-- [ ] Add server/API tests for coordinator prompting, audit history, and subscription idle injection.
-- [ ] Add a focused Playwright spec for the coordinator route with fake agents.
-- [ ] Run typecheck, unit tests, and relevant Playwright specs.
+- [x] Add server/API tests for coordinator prompting, audit history, and subscription idle injection. _Added `test/coordinator-api.test.ts`, which starts a fake coordinator server, creates two managed agents, exercises ORPC coordinator prompting, calls the MCP `subscribe` tool, and verifies the subscribed idle event/audit._
+- [x] Add a focused Playwright spec for the coordinator route with fake agents. _Added `spec/tuiui.spec.ts` coverage for `/coordinator`, the managed-agent sidebar, clash panel, and fake Codex coordinator replies._
+- [x] Run typecheck, unit tests, and relevant Playwright specs. _Verified with `bun run typecheck`, `bun test test/coordinator-api.test.ts test/coordinator-tools.test.ts test/coordinator-mcp.test.ts`, and `bun run spec --grep "shows the coordinator chat"`._
 - [ ] Move this task to `tasks/complete/` once the PR branch is complete and update the PR body.
 
 ## Guesses And Assumptions
@@ -80,3 +80,4 @@ The coordinator may inspect, brief, subscribe, and send prompts to managed sessi
 - The installed `@openai/codex-sdk@0.129.0` exposes `Codex.startThread`, `Codex.resumeThread`, repeated `Thread.run()`, config overrides, and MCP tool-call stream items, but not direct TypeScript callback tools.
 - The existing TUI UI session brief contract is already the right source for `getBriefing(agentId)` where available.
 - 2026-05-14: Implemented the first section and verified with `bun run typecheck` plus `bun test test/coordinator-tools.test.ts test/coordinator-mcp.test.ts`.
+- 2026-05-14: Added server/API and browser route coverage. The API test intentionally uses `git status --porcelain=v1 --untracked-files=all` so deterministic dirty-file clashes report exact untracked paths instead of only the parent directory.

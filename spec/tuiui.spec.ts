@@ -225,6 +225,30 @@ test("launches fake Codex, translates the TUI into semantic sections, and accept
   await expect(page.getByTestId("stdout-log")).toContainText("three");
 });
 
+test("shows the coordinator chat with managed agents and fake Codex replies", async ({ page }) => {
+  await using ctx = await createContext({ TUIUI_COORDINATOR_FAKE: "1" });
+
+  await page.goto(ctx.baseUrl);
+  await page.getByRole("textbox", { name: "Command" }).fill("bytewise-ui");
+  await page.getByRole("textbox", { name: "Command" }).press("Enter");
+  await expect(page.getByTestId("rendered-terminal")).toContainText("──hello──");
+  const sessionId = (await fetchSessionPayload(page)).id;
+
+  await page.goto(`${ctx.baseUrl}/coordinator`);
+
+  await expect(page.getByTestId("coordinator-status")).toHaveText(/idle · 1 agent · 0 clashes/);
+  await expect(page.getByTestId("coordinator-agents")).toContainText("bytewise-ui");
+  await expect(page.getByTestId("coordinator-agents").getByRole("link", { name: "bytewise-ui" })).toHaveAttribute("href", `/sessions/${sessionId}`);
+  await expect(page.getByTestId("coordinator-clashes")).toContainText("No deterministic clashes");
+
+  await page.getByRole("textbox", { name: "Message coordinator" }).fill("what's everybody working on?");
+  await page.getByTestId("send-coordinator").click();
+
+  await expect(page.getByTestId("coordinator-status")).toHaveText(/idle · 1 agent · 0 clashes/);
+  await expect(page.getByTestId("coordinator-messages")).toContainText("what's everybody working on?");
+  await expect(page.getByTestId("coordinator-messages")).toContainText("I can see 1 agent and 0 deterministic clashes.");
+});
+
 test("keeps the promptbox draft in localStorage per session", async ({ page, ctx }) => {
   await launchFakeCodex(page, ctx);
   const firstSessionId = (await fetchSessionPayload(page)).id;

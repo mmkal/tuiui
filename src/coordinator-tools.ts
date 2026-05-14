@@ -398,7 +398,7 @@ function snapshotBriefing(
 }
 
 function gitDirtyFiles(cwd: string) {
-  const output = gitOutput(cwd, ["status", "--porcelain=v1"]);
+  const output = gitOutput(cwd, ["status", "--porcelain=v1", "--untracked-files=all"]);
   if (!output) {
     return [];
   }
