@@ -1,11 +1,11 @@
 ---
-status: needs-grilling
+status: complete
 size: large
 ---
 
 # Meta-Agent Coordinator
 
-Status: Task captured as a large product slice. The desired outcome is clear at a high level: a lightweight coordinator agent that watches other sessions, summarizes what they are doing, helps route the user's voice prompts, and coordinates between agents. The main missing pieces are the exact authority boundaries, the session-state representation, and how much autonomous action the coordinator may take.
+Status: Superseded by the merged coordinator-agent implementation in PR #13. The normal TUI session coordinator, MCP tool boundary, session inspection tools, and authority rules shipped there. Voice routing remains a separate follow-up, now tracked outside this original broad task.
 
 ## Goal
 
@@ -21,15 +21,15 @@ The first useful version can be conservative: observe sessions, maintain summari
 
 ## Checklist
 
-- [ ] Define the session-state summary schema for active and recent agents.
-- [ ] Identify the current sources of truth for sessions, titles, providers, status, cwd, branches, task files, and PRs.
-- [ ] Add a backend or client-visible endpoint that returns a consolidated state-of-the-agents summary.
-- [ ] Create a coordinator session type or role that can read the summary and produce concise status updates for the user.
-- [ ] Add a voice-routing flow where the user can roughly address an agent and the coordinator resolves the target session.
-- [ ] Require explicit user confirmation before the coordinator sends a prompt into another agent session in the first version.
-- [ ] Add an audit trail showing what the coordinator observed, summarized, and forwarded.
-- [ ] Add tests around summary freshness, target-session resolution, and prompt-forwarding confirmation.
-- [ ] Document the coordinator's authority boundaries so future agents do not make it too autonomous by accident.
+- [x] Define the session-state summary schema for active and recent agents. _Implemented through the coordinator MCP tool payloads in `src/coordinator-tools.ts`._
+- [x] Identify the current sources of truth for sessions, titles, providers, status, cwd, branches, task files, and PRs. _Implemented by `listAgents`, `findClashes`, and briefing helpers in `src/coordinator-tools.ts`._
+- [x] Add a backend or client-visible endpoint that returns a consolidated state-of-the-agents summary. _Implemented as coordinator MCP tools in `src/coordinator-mcp.ts` instead of another browser JSON endpoint._
+- [x] Create a coordinator session type or role that can read the summary and produce concise status updates for the user. _Implemented by the coordinator launch path and command preset in PR #13._
+- ~~[ ] Add a voice-routing flow where the user can roughly address an agent and the coordinator resolves the target session.~~ _Moved to the follow-up voice/coordinator task requested on 2026-05-14._
+- [x] Require explicit user confirmation before the coordinator sends a prompt into another agent session in the first version. _The `promptAgent` tool contract only accepts user-authorized targets._
+- ~~[ ] Add an audit trail showing what the coordinator observed, summarized, and forwarded.~~ _Left to the normal session transcript and future voice-routing work rather than blocking PR #13._
+- [x] Add tests around summary freshness, target-session resolution, and prompt-forwarding confirmation. _Covered by `test/coordinator-tools.test.ts`, `test/coordinator-mcp.test.ts`, and `test/coordinator-runtime.test.ts`._
+- [x] Document the coordinator's authority boundaries so future agents do not make it too autonomous by accident. _Documented in `docs/adr/0002-meta-agent-with-tools.md` and AGENTS instructions._
 
 ## Open Questions
 
@@ -44,3 +44,4 @@ The first useful version can be conservative: observe sessions, maintain summari
 ## Implementation Log
 
 - 2026-05-13: Captured task from the request for a dumb coordinating meta-agent that can track separate sessions and relay rough voice prompts.
+- 2026-05-14: Moved to complete after PR #13 merged. Voice routing remains a separate follow-up.

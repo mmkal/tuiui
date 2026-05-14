@@ -1,11 +1,11 @@
 ---
-status: ready-for-review
+status: complete
 size: medium
 ---
 
 # Browser Agent Idle Notifications
 
-Status: First client-only slice is implemented and tested. The visible opt-in control, transition tracking, duplicate suppression, native click routing for live session routes, and in-app fallback are done; only manual backgrounded Chrome notification verification remains.
+Status: Complete and merged in PR #10. The visible opt-in control, transition tracking, duplicate suppression, native click routing for live session routes, and in-app fallback shipped with focused automated coverage. Manual backgrounded Chrome notification verification was left as a non-blocking follow-up rather than keeping this task active.
 
 ## Goal
 
@@ -35,7 +35,7 @@ When the Notification API is unavailable or denied, show one normal in-app toast
 - [x] Fall back to an in-app toast when browser notifications are denied or unavailable. _The helper sends the same transition through `showToast` when native notifications are not granted._
 - [x] Wire notification clicks to the relevant session route when possible. _Native click handlers focus/open `/sessions/:id` for live TUI sessions._
 - [x] Add focused tests for transition detection, duplicate suppression, fallback behavior, and no notification on initially idle sessions. _Added `test/browser-idle-notifications.test.ts` plus a Playwright control smoke in `spec/tuiui.spec.ts`._
-- [ ] Manually verify the browser notification behavior in Chrome with the TUI UI tab backgrounded if the local environment permits it.
+- ~~[ ] Manually verify the browser notification behavior in Chrome with the TUI UI tab backgrounded if the local environment permits it.~~ _Deferred as non-blocking after PR #10 merged with unit and Playwright coverage._
 
 ## Open Questions
 
@@ -49,3 +49,4 @@ When the Notification API is unavailable or denied, show one normal in-app toast
 - 2026-05-13: Captured task after confirming there was no active task, branch, PR, or code path for native browser notifications on idle transitions.
 - 2026-05-13: Bedtime scope narrowed to an opt-in browser-client implementation over existing session payloads; service-worker/background delivery is intentionally deferred.
 - 2026-05-13: Implemented the client-only notification helper, visible opt-in control, session/home observation hooks, native click routing for live sessions, and toast fallback. Verified with focused Bun tests, one Playwright permission-control smoke, one existing session-detail smoke, and typecheck.
+- 2026-05-14: Moved to complete after PR #10 was already merged.
