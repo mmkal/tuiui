@@ -2053,7 +2053,7 @@ textarea {
   }
 
   .session-appbar {
-    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-columns: auto minmax(0, 1fr) auto auto auto;
     min-height: 34px;
     gap: 6px;
     padding-bottom: 0;

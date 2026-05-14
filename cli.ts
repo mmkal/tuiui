@@ -165,6 +165,7 @@ type RuntimeSession = {
   stdinEvents: StdinEvent[];
   stdoutEvents: StdoutEvent[];
   redrawGate: RedrawGate;
+  idleStatusTimer: ReturnType<typeof setTimeout> | null;
   subscribers: Set<(payload: SessionPayload) => void>;
   fakeAgent: FakeAgent | null;
 };
@@ -255,11 +256,23 @@ const resizeSessionInputSchema = sessionIdInputSchema.extend({
   cols: z.number().optional(),
   rows: z.number().optional(),
 });
+const stdoutSessionInputSchema = sessionIdInputSchema.extend({ after: z.number().optional() });
+
 type CreateSessionBody = z.infer<typeof createSessionBodySchema>;
 type SessionIdInput = z.infer<typeof sessionIdInputSchema>;
 type SendSessionInput = z.infer<typeof sendSessionInputSchema>;
 type KeySessionInput = z.infer<typeof keySessionInputSchema>;
 type ResizeSessionInput = z.infer<typeof resizeSessionInputSchema>;
+type StdoutSessionInput = z.infer<typeof stdoutSessionInputSchema>;
+
+type CommandPresetPayload = {
+  id: string;
+  label: string;
+  command: string;
+  args: string[];
+  fakeAgent: string;
+  coordinator?: boolean;
+};
 
 const cli = parseCliArgs(process.argv.slice(2));
 const state: ServerState = {
@@ -363,6 +376,7 @@ function createAppRouter(state: ServerState) {
       list: orpc.handler(() => sessionsListPayload(state)),
       create: orpc.input(createSessionBodySchema).handler(({ input }) => createSessionPayload(input)),
       get: orpc.input(sessionIdInputSchema).handler(({ input }) => sessionPayloadById(state, input.sessionId)),
+      stdout: orpc.input(stdoutSessionInputSchema).handler(({ input }) => stdoutSessionPayload(state, input)),
       recovery: orpc.input(sessionIdInputSchema).handler(({ input }) => sessionRecoveryPayload(state, input.sessionId)),
       recover: orpc.input(sessionIdInputSchema).handler(({ input }) => recoverStoredSessionPayload(state, input.sessionId)),
       archive: orpc.input(sessionIdInputSchema).handler(({ input }) => archiveSessionPayload(state, input.sessionId)),
@@ -442,9 +456,7 @@ async function handleApiRequest(state: ServerState, request: Request, url: URL):
 
   if (request.method === "GET" && action === "stdout") {
     const after = Number(url.searchParams.get("after") || 0);
-    return Response.json({
-      events: session.stdoutEvents.filter((event) => event.id > after),
-    });
+    return Response.json(await stdoutSessionPayload(state, { sessionId, after }));
   }
 
   if (request.method === "GET" && (action === "tuishot" || action === "tuishot.svg")) {
@@ -505,7 +517,7 @@ function cwdPayload() {
   };
 }
 
-function commandPresetsPayload() {
+function commandPresetsPayload(): CommandPresetPayload[] {
   return [
     { id: "custom", label: "Custom", command: "", args: [], fakeAgent: "" },
     { id: "coordinator", label: "Coordinator", command: "codex", args: coordinatorCodexArgs(), fakeAgent: "", coordinator: true },
@@ -758,6 +770,14 @@ async function sessionPayloadById(state: ServerState, sessionId: string) {
   return getSessionPayload(await liveSessionById(state, sessionId));
 }
 
+async function stdoutSessionPayload(state: ServerState, input: StdoutSessionInput) {
+  const session = await liveSessionById(state, input.sessionId);
+  const after = Number(input.after || 0);
+  return {
+    events: session.stdoutEvents.filter((event) => event.id > after),
+  };
+}
+
 function sessionRecoveryPayload(state: ServerState, sessionId: string) {
   const session = state.sessionStore.getSession(sessionId);
   if (!session) {
@@ -824,6 +844,7 @@ async function archiveSessionPayload(state: ServerState, sessionId: string) {
   state.sessionStore.archiveSession({ sessionId, archivedAtMs });
   if (session) {
     session.archivedAtMs = archivedAtMs;
+    clearIdleStatusTimer(session);
     publishSession(session);
     state.sessions.delete(session.id);
     await killSession(session);
@@ -1044,6 +1065,7 @@ async function createSession(input: CreateSessionInput) {
     stdinEvents: [],
     stdoutEvents: [],
     redrawGate: createRedrawGate(true),
+    idleStatusTimer: null,
     subscribers: new Set(),
     fakeAgent,
   };
@@ -1161,6 +1183,7 @@ async function reconnectSession(state: ServerState, id: string) {
     stdinEvents: [],
     stdoutEvents: [],
     redrawGate: createRedrawGate(true),
+    idleStatusTimer: null,
     subscribers: new Set(),
     fakeAgent: null,
   };
@@ -1462,6 +1485,7 @@ async function killSession(session: RuntimeSession) {
 function publishSession(session: RuntimeSession) {
   const payload = getSessionPayload(session);
   observeCoordinatorSessionStatus(state, session, payload);
+  scheduleIdleStatusPublish(session, payload);
   for (const subscriber of session.subscribers) {
     subscriber(payload);
   }
@@ -1492,6 +1516,38 @@ function observeCoordinatorSessionStatus(state: ServerState, session: RuntimeSes
   }
   const text = `Agent ${payload.id} (${payload.title}) went idle. Latest task: ${payload.sdk.summary?.latestUserText || payload.semantic.prompt || payload.command}`;
   void queueCoordinatorEventPrompt(state, text);
+}
+
+function scheduleIdleStatusPublish(session: RuntimeSession, payload: SessionPayload) {
+  clearIdleStatusTimer(session);
+  if (payload.archivedAtMs || payload.lifecycle !== "running" || payload.status !== "busy") {
+    return;
+  }
+  scheduleIdleStatusTimer(session);
+}
+
+function scheduleIdleStatusTimer(session: RuntimeSession) {
+  const lastOutputAtMs = new Date(session.lastOutputAt).getTime();
+  const delayMs = Math.max(0, lastOutputAtMs + idleThresholdMs - Date.now()) + 25;
+  session.idleStatusTimer = setTimeout(() => {
+    session.idleStatusTimer = null;
+    if (session.archivedAtMs || session.lifecycle !== "running") {
+      return;
+    }
+    if (Date.now() - new Date(session.lastOutputAt).getTime() < idleThresholdMs) {
+      scheduleIdleStatusTimer(session);
+      return;
+    }
+    publishSession(session);
+  }, delayMs);
+}
+
+function clearIdleStatusTimer(session: RuntimeSession) {
+  if (!session.idleStatusTimer) {
+    return;
+  }
+  clearTimeout(session.idleStatusTimer);
+  session.idleStatusTimer = null;
 }
 
 function streamSessionEvents(session: RuntimeSession) {

@@ -10,7 +10,7 @@ import type { RouterClient } from "@orpc/server";
 import { expect, test } from "bun:test";
 import type { AppRouter } from "../cli.ts";
 
-test("serves JSON procedures through ORPC while keeping legacy api routes", async () => {
+test("serves JSON procedures through ORPC while keeping api compatibility routes", async () => {
   const rootDir = path.resolve(import.meta.dirname, "..");
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "tuiui-orpc-api-"));
   const binDir = path.join(workspace, "bin");
