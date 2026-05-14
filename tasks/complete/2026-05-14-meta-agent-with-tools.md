@@ -1,11 +1,11 @@
 ---
-status: ready
+status: complete
 size: large
 ---
 
 # Meta-Agent With Tools
 
-Status: Implementation complete pending final PR housekeeping. The deterministic coordination functions, MCP wrapper, server coordinator state/routes, idle-event subscription hook, browser coordinator route, API coverage, and Playwright route coverage are in place. Focused verification is green; remaining work is moving the task to complete and updating the PR body.
+Status: Done. The deterministic coordination functions, MCP wrapper, server coordinator state/routes, idle-event subscription hook, browser coordinator route, API coverage, and Playwright route coverage are in place. Full typecheck, Bun tests, and Playwright specs are green.
 
 ## Goal
 
@@ -55,8 +55,8 @@ The coordinator may inspect, brief, subscribe, and send prompts to managed sessi
 - [x] Add unit tests for deterministic coordination functions and clash detection. _Added `test/coordinator-tools.test.ts` and `test/coordinator-mcp.test.ts`; both pass._
 - [x] Add server/API tests for coordinator prompting, audit history, and subscription idle injection. _Added `test/coordinator-api.test.ts`, which starts a fake coordinator server, creates two managed agents, exercises ORPC coordinator prompting, calls the MCP `subscribe` tool, and verifies the subscribed idle event/audit._
 - [x] Add a focused Playwright spec for the coordinator route with fake agents. _Added `spec/tuiui.spec.ts` coverage for `/coordinator`, the managed-agent sidebar, clash panel, and fake Codex coordinator replies._
-- [x] Run typecheck, unit tests, and relevant Playwright specs. _Verified with `bun run typecheck`, `bun test test/coordinator-api.test.ts test/coordinator-tools.test.ts test/coordinator-mcp.test.ts`, and `bun run spec --grep "shows the coordinator chat"`._
-- [ ] Move this task to `tasks/complete/` once the PR branch is complete and update the PR body.
+- [x] Run typecheck, unit tests, and relevant Playwright specs. _Verified with `bun run typecheck`, `bun test test`, `bun run spec`, and the focused coordinator commands `bun test test/coordinator-api.test.ts test/coordinator-tools.test.ts test/coordinator-mcp.test.ts` plus `bun run spec --grep "shows the coordinator chat"`._
+- [x] Move this task to `tasks/complete/` once the PR branch is complete and update the PR body. _Moved the task and grill transcript to `tasks/complete/` with a 2026-05-14 date prefix; PR body update is the final GitHub housekeeping step after this commit._
 
 ## Guesses And Assumptions
 
@@ -81,3 +81,4 @@ The coordinator may inspect, brief, subscribe, and send prompts to managed sessi
 - The existing TUI UI session brief contract is already the right source for `getBriefing(agentId)` where available.
 - 2026-05-14: Implemented the first section and verified with `bun run typecheck` plus `bun test test/coordinator-tools.test.ts test/coordinator-mcp.test.ts`.
 - 2026-05-14: Added server/API and browser route coverage. The API test intentionally uses `git status --porcelain=v1 --untracked-files=all` so deterministic dirty-file clashes report exact untracked paths instead of only the parent directory.
+- 2026-05-14: Full verification passed with `bun run typecheck`, `bun test test`, and `bun run spec`. While running the full Playwright suite, fixed two legacy-API test stubs that were bypassed by ORPC and nudged the mobile toast offset below the session appbar.
