@@ -218,6 +218,64 @@ type SessionListItem = {
   status: "busy" | "idle" | "exited";
 };
 
+type CoordinatorPayload = {
+  threadId: string;
+  status: "idle" | "running" | "error";
+  error: string;
+  messages: CoordinatorMessage[];
+  audit: CoordinatorAuditEntry[];
+  subscriptions: Array<{ agentId: string; createdAt: string }>;
+  agents: CoordinatorAgent[];
+  clashes: CoordinatorClash[];
+};
+
+type CoordinatorMessage = {
+  id: string;
+  role: "user" | "assistant" | "event" | "error";
+  text: string;
+  createdAt: string;
+};
+
+type CoordinatorAuditEntry = {
+  id: string;
+  kind: string;
+  agentId: string;
+  text: string;
+  createdAt: string;
+};
+
+type CoordinatorAgent = {
+  id: string;
+  source: "managed" | "recent-codex";
+  provider: "" | "opencode" | "codex" | "claude";
+  title: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  status: "busy" | "idle" | "exited";
+  lifecycle: "running" | "exited" | "external";
+  updatedAt: string;
+  lastOutputAt: string;
+  routePath: string;
+  promptable: boolean;
+  latestUserText: string;
+  latestAssistantText: string;
+  task: string;
+  gitRoot: string;
+  branch: string;
+  dirtyFiles: string[];
+  prNumber: number | null;
+};
+
+type CoordinatorClash = {
+  kind: "dirty-file" | "same-branch" | "same-pr";
+  gitRoot: string;
+  branch: string;
+  file: string;
+  prNumber: number | null;
+  agents: Array<{ id: string; title: string; status: string; routePath: string }>;
+};
+
 type LaunchSessionInput = {
   command: string;
   args: string[];
@@ -286,6 +344,7 @@ let composerAttachments: ComposerAttachment[] = [];
 let sessionIdleRefreshTimer: number | null = null;
 let homeIdleNotificationPollTimer: number | null = null;
 let homeIdleNotificationDisplayDirs: string[] = [];
+let coordinatorPollTimer: number | null = null;
 
 const idleNotifications = new BrowserIdleNotifications({
   storage: window.localStorage,
@@ -660,6 +719,7 @@ async function renderRoute() {
   stopTerminalAutoResize();
   clearSessionIdleRefreshTimer();
   stopHomeIdleNotificationPolling();
+  stopCoordinatorPolling();
   destroyXterm();
   activeSession = null;
   destroyDataEditor();
@@ -675,6 +735,11 @@ async function renderRoute() {
     } catch (error) {
       await renderMissingSession(sessionMatch[1]!, String(error instanceof Error ? error.message : error));
     }
+    return;
+  }
+
+  if (location.pathname === "/coordinator") {
+    await renderCoordinator();
     return;
   }
 
@@ -716,12 +781,200 @@ async function fetchSessionRecovery(sessionId: string) {
   }
 }
 
+async function renderCoordinator() {
+  const payload = await api<CoordinatorPayload>("/api/coordinator");
+  app.innerHTML = `
+    <main class="layout home-layout coordinator-layout">
+      <header class="topbar">
+        <a class="brand" href="/">tuiui</a>
+        <span class="muted" data-testid="coordinator-status">${escapeHtml(formatCoordinatorStatus(payload))}</span>
+      </header>
+      <section class="coordinator-chat" aria-label="Coordinator chat">
+        <div class="coordinator-messages" data-testid="coordinator-messages">
+          ${renderCoordinatorMessages(payload)}
+        </div>
+        <form id="coordinator-form" class="coordinator-form">
+          <textarea name="prompt" aria-label="Message coordinator" placeholder="Ask the coordinator"></textarea>
+          <button type="submit" class="primary-button" data-testid="send-coordinator">Send</button>
+        </form>
+      </section>
+      <section class="coordinator-sidebar" aria-label="Coordinator state">
+        <div data-testid="coordinator-agents">
+          ${renderCoordinatorAgents(payload.agents)}
+        </div>
+        <div data-testid="coordinator-clashes">
+          ${renderCoordinatorClashes(payload.clashes)}
+        </div>
+      </section>
+    </main>
+  `;
+  bindCoordinatorForm();
+  startCoordinatorPolling();
+}
+
+function bindCoordinatorForm() {
+  const form = document.getElementById("coordinator-form") as HTMLFormElement | null;
+  if (!form) {
+    return;
+  }
+  const prompt = form.elements.namedItem("prompt") as HTMLTextAreaElement;
+  const submit = form.querySelector<HTMLButtonElement>("button[type='submit']");
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const text = prompt.value.trim();
+    if (!text) {
+      return;
+    }
+    if (submit) {
+      submit.disabled = true;
+      submit.textContent = "Sending";
+    }
+    try {
+      const payload = await api<CoordinatorPayload>("/api/coordinator/send", {
+        method: "POST",
+        body: JSON.stringify({ prompt: text }),
+      });
+      prompt.value = "";
+      renderCoordinatorPayload(payload);
+    } finally {
+      if (submit) {
+        submit.disabled = false;
+        submit.textContent = "Send";
+      }
+    }
+  });
+}
+
+function startCoordinatorPolling() {
+  stopCoordinatorPolling();
+  coordinatorPollTimer = window.setInterval(() => {
+    if (location.pathname !== "/coordinator") {
+      stopCoordinatorPolling();
+      return;
+    }
+    void api<CoordinatorPayload>("/api/coordinator")
+      .then(renderCoordinatorPayload)
+      .catch(() => undefined);
+  }, 5_000);
+}
+
+function stopCoordinatorPolling() {
+  if (coordinatorPollTimer === null) {
+    return;
+  }
+  window.clearInterval(coordinatorPollTimer);
+  coordinatorPollTimer = null;
+}
+
+function renderCoordinatorPayload(payload: CoordinatorPayload) {
+  const status = document.querySelector<HTMLElement>("[data-testid='coordinator-status']");
+  const messages = document.querySelector<HTMLElement>("[data-testid='coordinator-messages']");
+  const agents = document.querySelector<HTMLElement>("[data-testid='coordinator-agents']");
+  const clashes = document.querySelector<HTMLElement>("[data-testid='coordinator-clashes']");
+  if (status) {
+    status.textContent = formatCoordinatorStatus(payload);
+  }
+  if (messages) {
+    messages.innerHTML = renderCoordinatorMessages(payload);
+    messages.scrollTop = messages.scrollHeight;
+  }
+  if (agents) {
+    agents.innerHTML = renderCoordinatorAgents(payload.agents);
+  }
+  if (clashes) {
+    clashes.innerHTML = renderCoordinatorClashes(payload.clashes);
+  }
+}
+
+function renderCoordinatorMessages(payload: CoordinatorPayload) {
+  if (!payload.messages.length) {
+    return `<p class="empty">No coordinator messages</p>`;
+  }
+  return payload.messages.map((message) => `
+    <article class="coordinator-message" data-role="${escapeAttr(message.role)}">
+      <header>
+        <strong>${escapeHtml(coordinatorMessageLabel(message.role))}</strong>
+        <time>${escapeHtml(formatShortTime(message.createdAt))}</time>
+      </header>
+      <p>${escapeHtml(message.text)}</p>
+    </article>
+  `).join("");
+}
+
+function renderCoordinatorAgents(agents: CoordinatorAgent[]) {
+  return `
+    <header class="coordinator-panel-header">
+      <strong>Agents</strong>
+      <span>${agents.length}</span>
+    </header>
+    ${agents.length ? agents.map((agent) => `
+      <div class="coordinator-agent-row">
+        <span class="status-dot" data-state="${escapeAttr(agent.status)}" aria-hidden="true"></span>
+        <div>
+          ${agent.routePath ? `<a href="${escapeAttr(agent.routePath)}">${escapeHtml(agent.title || agent.id)}</a>` : `<strong>${escapeHtml(agent.title || agent.id)}</strong>`}
+          <code>${escapeHtml([agent.branch, formatPathForDisplay(agent.cwd, homeIdleNotificationDisplayDirs)].filter(Boolean).join(" · "))}</code>
+        </div>
+      </div>
+    `).join("") : `<p class="empty">No agents</p>`}
+  `;
+}
+
+function renderCoordinatorClashes(clashes: CoordinatorClash[]) {
+  return `
+    <header class="coordinator-panel-header">
+      <strong>Clashes</strong>
+      <span>${clashes.length}</span>
+    </header>
+    ${clashes.length ? clashes.map((clash) => `
+      <div class="coordinator-clash-row">
+        <strong>${escapeHtml(formatCoordinatorClashTitle(clash))}</strong>
+        <span>${escapeHtml(clash.agents.map((agent) => agent.title || agent.id).join(", "))}</span>
+      </div>
+    `).join("") : `<p class="empty">No deterministic clashes</p>`}
+  `;
+}
+
+function formatCoordinatorStatus(payload: CoordinatorPayload) {
+  const agentText = `${payload.agents.length} agent${payload.agents.length === 1 ? "" : "s"}`;
+  const clashText = `${payload.clashes.length} clash${payload.clashes.length === 1 ? "" : "es"}`;
+  return `${payload.status} · ${agentText} · ${clashText}`;
+}
+
+function coordinatorMessageLabel(role: CoordinatorMessage["role"]) {
+  if (role === "assistant") {
+    return "coordinator";
+  }
+  if (role === "event") {
+    return "event";
+  }
+  return role;
+}
+
+function formatCoordinatorClashTitle(clash: CoordinatorClash) {
+  if (clash.kind === "dirty-file") {
+    return `dirty file: ${clash.file}`;
+  }
+  if (clash.kind === "same-branch") {
+    return `branch: ${clash.branch}`;
+  }
+  return `PR #${clash.prNumber}`;
+}
+
+function formatShortTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
 async function renderHome() {
-  const [cwd, sessions, commands, recentAgentSessions] = await Promise.all([
+  const [cwd, sessions, commands, recentAgentSessions, coordinator] = await Promise.all([
     api<{ cwd: string; homeDir?: string; homeDirs?: string[] }>("/api/cwd"),
     api<SessionListItem[]>("/api/sessions"),
     api<CommandPreset[]>("/api/commands"),
     api<RecentAgentSession[]>("/api/agent-sessions/recent"),
+    api<CoordinatorPayload>("/api/coordinator"),
   ]);
   const displayHomeDirs = homeDirsForDisplay(cwd);
   homeIdleNotificationDisplayDirs = displayHomeDirs;
@@ -739,6 +992,13 @@ async function renderHome() {
         <span class="muted" data-testid="session-count">${sessions.length} sessions</span>
         ${renderIdleNotificationControl()}
       </header>
+      <section class="coordinator-home" aria-label="Coordinator" data-testid="coordinator-home">
+        <header>
+          <strong>Coordinator</strong>
+          <span>${escapeHtml(formatCoordinatorStatus(coordinator))}</span>
+        </header>
+        <a class="primary-button" href="/coordinator" data-testid="open-coordinator">Open coordinator</a>
+      </section>
       <section class="launcher" aria-label="Launch session">
         <form id="launch-form" class="launch-form">
           <div class="launch-command-row">

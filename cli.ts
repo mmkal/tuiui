@@ -10,7 +10,7 @@ import { StringDecoder } from "node:string_decoder";
 import { stripVTControlCharacters } from "node:util";
 import { ORPCError, os as orpc } from "@orpc/server";
 import { RPCHandler } from "@orpc/server/fetch";
-import { Codex } from "@openai/codex-sdk";
+import { Codex, type Thread } from "@openai/codex-sdk";
 import { createOpencodeClient } from "@opencode-ai/sdk/client";
 import { Terminal as HeadlessTerminal } from "@xterm/headless";
 import { SerializeAddon } from "@xterm/addon-serialize";
@@ -72,6 +72,17 @@ import {
 } from "./src/tmux-backend.ts";
 import { renderTerminalShotSvg } from "./src/tuishot.ts";
 import { createSessionStoreForEnv, type SessionStore } from "./src/session-store.ts";
+import {
+  buildCoordinatorAgents,
+  buildCoordinatorBriefing,
+  findCoordinatorClashes,
+  managedCoordinatorAgentSource,
+  recentCodexCoordinatorAgentSource,
+  type CoordinatorAgent,
+  type CoordinatorAgentSource,
+  type CoordinatorClash,
+} from "./src/coordinator-tools.ts";
+import { handleCoordinatorMcpRequest, type CoordinatorMcpHandlers } from "./src/coordinator-mcp.ts";
 
 if (typeof Bun === "undefined") {
   throw new Error("tuiui requires the Bun runtime. Run `bun run cli.ts ...`.");
@@ -194,6 +205,39 @@ type ServerState = {
   nextStdoutEventId: number;
   nextStdinEventId: number;
   sessionStore: SessionStore;
+  coordinator: CoordinatorState;
+};
+
+type CoordinatorState = {
+  thread: Thread | null;
+  threadId: string;
+  status: "idle" | "running" | "error";
+  error: string;
+  messages: CoordinatorMessage[];
+  audit: CoordinatorAuditEntry[];
+  subscriptions: Map<string, CoordinatorSubscription>;
+  lastAgentStatuses: Map<string, SessionStatus>;
+  runQueue: Promise<void>;
+};
+
+type CoordinatorMessage = {
+  id: string;
+  role: "user" | "assistant" | "event" | "error";
+  text: string;
+  createdAt: string;
+};
+
+type CoordinatorAuditEntry = {
+  id: string;
+  kind: "prompt-agent" | "subscribe" | "idle-event" | "tool-error";
+  agentId: string;
+  text: string;
+  createdAt: string;
+};
+
+type CoordinatorSubscription = {
+  agentId: string;
+  createdAt: string;
 };
 
 const loopbackHost = "127.0.0.1";
@@ -227,12 +271,16 @@ const resizeSessionInputSchema = sessionIdInputSchema.extend({
   cols: z.number().optional(),
   rows: z.number().optional(),
 });
+const coordinatorSendInputSchema = z.object({
+  prompt: z.string().optional(),
+});
 
 type CreateSessionBody = z.infer<typeof createSessionBodySchema>;
 type SessionIdInput = z.infer<typeof sessionIdInputSchema>;
 type SendSessionInput = z.infer<typeof sendSessionInputSchema>;
 type KeySessionInput = z.infer<typeof keySessionInputSchema>;
 type ResizeSessionInput = z.infer<typeof resizeSessionInputSchema>;
+type CoordinatorSendInput = z.infer<typeof coordinatorSendInputSchema>;
 
 const cli = parseCliArgs(process.argv.slice(2));
 const state: ServerState = {
@@ -240,6 +288,7 @@ const state: ServerState = {
   nextStdoutEventId: 1,
   nextStdinEventId: 1,
   sessionStore: createSessionStoreForEnv(process.env),
+  coordinator: createCoordinatorState(),
 };
 const server: ReturnType<typeof Bun.serve> = startServer({ host: cli.host, port: cli.port, state });
 const serverPort = Number(server.port || cli.port);
@@ -288,12 +337,16 @@ function startServer(options: { host: string; port: number; state: ServerState }
       "/": homepage,
       "/sessions": homepage,
       "/sessions/:id": homepage,
+      "/coordinator": homepage,
       "/health": {
         GET: () => Response.json({ ok: true }),
       },
     },
     async fetch(request): Promise<Response> {
       const url = new URL(request.url);
+      if (url.pathname === "/mcp/coordinator") {
+        return await handleCoordinatorMcpRequest(request, createCoordinatorMcpHandlers(options.state));
+      }
       const rpc = await rpcHandler.handle(request, {
         prefix: "/rpc",
         context: {},
@@ -320,6 +373,10 @@ function createAppRouter(state: ServerState) {
     commands: orpc.handler(() => commandPresetsPayload()),
     agentSessions: {
       recent: orpc.handler(() => readRecentAgentSessions()),
+    },
+    coordinator: {
+      get: orpc.handler(() => coordinatorPayload(state)),
+      send: orpc.input(coordinatorSendInputSchema).handler(({ input }) => sendCoordinatorPayload(state, input)),
     },
     codexSessions: {
       recent: orpc.handler(() => readRecentCodexSessions()),
@@ -358,6 +415,14 @@ async function handleApiRequest(state: ServerState, request: Request, url: URL):
 
   if (request.method === "GET" && url.pathname === "/api/agent-sessions/recent") {
     return Response.json(await readRecentAgentSessions());
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/coordinator") {
+    return Response.json(coordinatorPayload(state));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/coordinator/send") {
+    return Response.json(await sendCoordinatorPayload(state, await request.json() as CoordinatorSendInput));
   }
 
   if (request.method === "GET" && url.pathname === "/api/codex-sessions/recent") {
@@ -481,6 +546,287 @@ function commandPresetsPayload() {
     { id: "fake-claude", label: "Fake Claude", command: "claude", args: [], fakeAgent: "claude" },
     { id: "ghui", label: "ghui", command: "ghui", args: [], fakeAgent: "" },
   ];
+}
+
+function createCoordinatorState(): CoordinatorState {
+  return {
+    thread: null,
+    threadId: "",
+    status: "idle",
+    error: "",
+    messages: [],
+    audit: [],
+    subscriptions: new Map(),
+    lastAgentStatuses: new Map(),
+    runQueue: Promise.resolve(),
+  };
+}
+
+function coordinatorPayload(state: ServerState) {
+  const agents = listCoordinatorAgents(state);
+  return {
+    threadId: state.coordinator.threadId,
+    status: state.coordinator.status,
+    error: state.coordinator.error,
+    messages: state.coordinator.messages.slice(-80),
+    audit: state.coordinator.audit.slice(-80),
+    subscriptions: [...state.coordinator.subscriptions.values()],
+    agents,
+    clashes: findCoordinatorClashes(agents),
+  };
+}
+
+async function sendCoordinatorPayload(state: ServerState, input: CoordinatorSendInput) {
+  const prompt = String(input.prompt || "").trim();
+  if (!prompt) {
+    throw new ORPCError("BAD_REQUEST", { message: "prompt is required" });
+  }
+  addCoordinatorMessage(state, "user", prompt);
+  await queueCoordinatorPrompt(state, prompt);
+  return coordinatorPayload(state);
+}
+
+function createCoordinatorMcpHandlers(state: ServerState): CoordinatorMcpHandlers {
+  return {
+    listAgents: () => listCoordinatorAgents(state),
+    getBriefing: (agentId) => coordinatorBriefingById(state, agentId),
+    promptAgent: async (agentId, prompt) => await coordinatorPromptAgent(state, agentId, prompt),
+    subscribe: (agentId) => coordinatorSubscribeAgent(state, agentId),
+    findClashes: () => findCoordinatorClashes(listCoordinatorAgents(state)),
+  };
+}
+
+function listCoordinatorAgents(state: ServerState): CoordinatorAgent[] {
+  return buildCoordinatorAgents(listCoordinatorAgentSources(state));
+}
+
+function listCoordinatorAgentSources(state: ServerState): CoordinatorAgentSource[] {
+  const managedSources = [...state.sessions.values()]
+    .filter((session) => !session.archivedAtMs && !state.sessionStore.getSession(session.id)?.archivedAtMs)
+    .map((session) => managedCoordinatorAgentSource({
+      id: session.id,
+      title: sessionDisplayTitle(session),
+      command: session.command,
+      args: session.args,
+      cwd: session.cwd,
+      status: runtimeSessionStatus(session),
+      lifecycle: session.lifecycle,
+      updatedAt: session.updatedAt,
+      lastOutputAt: session.lastOutputAt,
+      routePath: `/sessions/${session.id}`,
+      sdk: session.sdk,
+      semanticPrompt: session.semantic.prompt,
+    }));
+  const managedCodexIds = new Set(managedSources
+    .map((source) => source.sdk?.externalSessionId || "")
+    .filter(Boolean));
+  return [
+    ...managedSources,
+    ...safeRecentCodexSessions()
+      .filter((session) => !managedCodexIds.has(session.id))
+      .map(recentCodexCoordinatorAgentSource),
+  ].sort((left, right) => Date.parse(right.lastOutputAt || right.updatedAt) - Date.parse(left.lastOutputAt || left.updatedAt));
+}
+
+function coordinatorBriefingById(state: ServerState, agentId: string) {
+  const source = coordinatorSourceById(state, agentId);
+  const agent = listCoordinatorAgents(state).find((candidate) => candidate.id === agentId);
+  if (!source || !agent) {
+    throw new Error(`Unknown agent: ${agentId}`);
+  }
+  return buildCoordinatorBriefing(source, agent);
+}
+
+async function coordinatorPromptAgent(state: ServerState, agentId: string, prompt: string) {
+  const session = state.sessions.get(agentId);
+  if (!session || session.archivedAtMs || session.lifecycle !== "running") {
+    throw new Error(`Agent is not a live managed session: ${agentId}`);
+  }
+  const text = String(prompt || "").trim();
+  if (!text) {
+    throw new Error("prompt is required");
+  }
+  await sendToSession(state, session, text, true);
+  const createdAt = new Date().toISOString();
+  addCoordinatorAudit(state, "prompt-agent", agentId, text, createdAt);
+  return {
+    ok: true,
+    agentId,
+    prompt: text,
+    message: `Prompt sent to ${sessionDisplayTitle(session)}.`,
+    createdAt,
+  };
+}
+
+function coordinatorSubscribeAgent(state: ServerState, agentId: string) {
+  if (!coordinatorSourceById(state, agentId)) {
+    throw new Error(`Unknown agent: ${agentId}`);
+  }
+  const createdAt = new Date().toISOString();
+  state.coordinator.subscriptions.set(agentId, { agentId, createdAt });
+  const session = state.sessions.get(agentId);
+  if (session) {
+    state.coordinator.lastAgentStatuses.set(agentId, runtimeSessionStatus(session));
+    scheduleCoordinatorIdleCheck(state, session);
+  }
+  addCoordinatorAudit(state, "subscribe", agentId, "Subscribed to idle transition.", createdAt);
+  return {
+    ok: true,
+    agentId,
+    message: `Subscribed to ${agentId}.`,
+    createdAt,
+  };
+}
+
+function coordinatorSourceById(state: ServerState, agentId: string) {
+  return listCoordinatorAgentSources(state).find((source) => source.id === agentId) || null;
+}
+
+function safeRecentCodexSessions() {
+  try {
+    return readRecentCodexSessions();
+  } catch {
+    return [];
+  }
+}
+
+function runtimeSessionStatus(session: RuntimeSession): SessionStatus {
+  if (session.lifecycle === "exited") {
+    return "exited";
+  }
+  return Date.now() - new Date(session.lastOutputAt).getTime() < idleThresholdMs ? "busy" : "idle";
+}
+
+function addCoordinatorMessage(state: ServerState, role: CoordinatorMessage["role"], text: string) {
+  const createdAt = new Date().toISOString();
+  state.coordinator.messages.push({
+    id: `${createdAt}:${state.coordinator.messages.length}`,
+    role,
+    text,
+    createdAt,
+  });
+}
+
+function addCoordinatorAudit(
+  state: ServerState,
+  kind: CoordinatorAuditEntry["kind"],
+  agentId: string,
+  text: string,
+  createdAt: string,
+) {
+  state.coordinator.audit.push({
+    id: `${createdAt}:${state.coordinator.audit.length}`,
+    kind,
+    agentId,
+    text,
+    createdAt,
+  });
+}
+
+async function queueCoordinatorPrompt(state: ServerState, prompt: string) {
+  state.coordinator.runQueue = state.coordinator.runQueue
+    .then(async () => await runCoordinatorTurn(state, prompt))
+    .catch(async () => await runCoordinatorTurn(state, prompt));
+  await state.coordinator.runQueue;
+}
+
+async function queueCoordinatorEventPrompt(state: ServerState, prompt: string) {
+  state.coordinator.runQueue = state.coordinator.runQueue
+    .then(async () => await runCoordinatorTurn(state, prompt))
+    .catch(async () => await runCoordinatorTurn(state, prompt));
+}
+
+async function runCoordinatorTurn(state: ServerState, prompt: string) {
+  state.coordinator.status = "running";
+  state.coordinator.error = "";
+  try {
+    const response = process.env.TUIUI_COORDINATOR_FAKE === "1"
+      ? fakeCoordinatorResponse(state, prompt)
+      : await runCodexCoordinatorTurn(state, prompt);
+    addCoordinatorMessage(state, "assistant", response);
+    state.coordinator.status = "idle";
+  } catch (error) {
+    const message = String(error instanceof Error ? error.message : error);
+    state.coordinator.error = message;
+    state.coordinator.status = "error";
+    addCoordinatorMessage(state, "error", message);
+  }
+}
+
+async function runCodexCoordinatorTurn(state: ServerState, prompt: string) {
+  const thread = coordinatorThread(state);
+  const result = await thread.run(createCoordinatorPrompt(prompt));
+  state.coordinator.threadId = thread.id || state.coordinator.threadId;
+  return result.finalResponse || "Coordinator finished without a final response.";
+}
+
+function coordinatorThread(state: ServerState) {
+  if (state.coordinator.thread) {
+    return state.coordinator.thread;
+  }
+  const codex = new Codex({
+    env: minimalEnv(process.env),
+    config: {
+      mcp_servers: {
+        tuiui_coordinator: {
+          url: `${baseUrl}/mcp/coordinator`,
+          enabled_tools: ["listAgents", "getBriefing", "promptAgent", "subscribe", "findClashes"],
+          tool_timeout_sec: 20,
+          required: true,
+        },
+      },
+    },
+  });
+  state.coordinator.thread = state.coordinator.threadId
+    ? codex.resumeThread(state.coordinator.threadId, coordinatorThreadOptions())
+    : codex.startThread(coordinatorThreadOptions());
+  return state.coordinator.thread;
+}
+
+function coordinatorThreadOptions() {
+  return {
+    workingDirectory: process.cwd(),
+    skipGitRepoCheck: true,
+    sandboxMode: "read-only" as const,
+    approvalPolicy: "never" as const,
+    networkAccessEnabled: false,
+  };
+}
+
+function createCoordinatorPrompt(prompt: string) {
+  return [
+    "You are TUI UI's coordinator agent. Use the TUI UI MCP tools to inspect managed agents, brief the user, and find exact work clashes.",
+    "Call listAgents and findClashes before answering broad status questions. Call getBriefing for agents that need more detail.",
+    "Only call promptAgent when the human explicitly asks you to tell an agent something. Never kill, archive, merge, push, or rewrite history.",
+    "When an idle event is injected, update your situational awareness and summarize what changed. Do not automatically prompt worker agents because of an idle event.",
+    "User or system prompt:",
+    prompt,
+  ].join("\n\n");
+}
+
+function fakeCoordinatorResponse(state: ServerState, prompt: string) {
+  const agents = listCoordinatorAgents(state);
+  const clashes = findCoordinatorClashes(agents);
+  if (/clash|conflict|overlap/i.test(prompt)) {
+    return clashes.length
+      ? `Found ${clashes.length} deterministic clash${clashes.length === 1 ? "" : "es"}. ${clashes.map(formatFakeClash).join(" ")}`
+      : `No deterministic clashes across ${agents.length} agent${agents.length === 1 ? "" : "s"}.`;
+  }
+  if (/idle|went idle|event/i.test(prompt)) {
+    return `Noted idle event. I can see ${agents.length} agent${agents.length === 1 ? "" : "s"} right now.`;
+  }
+  return `I can see ${agents.length} agent${agents.length === 1 ? "" : "s"} and ${clashes.length} deterministic clash${clashes.length === 1 ? "" : "es"}.`;
+}
+
+function formatFakeClash(clash: CoordinatorClash) {
+  const agents = clash.agents.map((agent) => agent.title || agent.id).join(", ");
+  if (clash.kind === "dirty-file") {
+    return `${agents} overlap on ${clash.file}.`;
+  }
+  if (clash.kind === "same-branch") {
+    return `${agents} share branch ${clash.branch}.`;
+  }
+  return `${agents} share PR #${clash.prNumber}.`;
 }
 
 function sessionsListPayload(state: ServerState) {
@@ -1035,6 +1381,7 @@ async function appendOutput(state: ServerState, session: RuntimeSession, chunk: 
     createdAt: now,
   });
   state.nextStdoutEventId += 1;
+  scheduleCoordinatorIdleCheck(state, session);
   if (session.redrawGate.active) {
     scheduleRedrawGateFlush(session);
     return;
@@ -1209,9 +1556,40 @@ async function killSession(session: RuntimeSession) {
 
 function publishSession(session: RuntimeSession) {
   const payload = getSessionPayload(session);
+  observeCoordinatorSessionStatus(state, session, payload);
   for (const subscriber of session.subscribers) {
     subscriber(payload);
   }
+}
+
+function scheduleCoordinatorIdleCheck(state: ServerState, session: RuntimeSession) {
+  if (!state.coordinator.subscriptions.has(session.id)) {
+    return;
+  }
+  setTimeout(() => {
+    if (!state.sessions.has(session.id) || session.lifecycle !== "running") {
+      return;
+    }
+    const payload = getSessionPayload(session);
+    observeCoordinatorSessionStatus(state, session, payload);
+  }, idleThresholdMs + 100);
+}
+
+function observeCoordinatorSessionStatus(state: ServerState, session: RuntimeSession, payload: SessionPayload) {
+  const previous = state.coordinator.lastAgentStatuses.get(session.id);
+  state.coordinator.lastAgentStatuses.set(session.id, payload.status);
+  if (
+    previous !== "busy" ||
+    payload.status !== "idle" ||
+    !state.coordinator.subscriptions.has(session.id)
+  ) {
+    return;
+  }
+  const text = `Agent ${payload.id} (${payload.title}) went idle. Latest task: ${payload.sdk.summary?.latestUserText || payload.semantic.prompt || payload.command}`;
+  const createdAt = new Date().toISOString();
+  addCoordinatorMessage(state, "event", text);
+  addCoordinatorAudit(state, "idle-event", payload.id, text, createdAt);
+  void queueCoordinatorEventPrompt(state, text);
 }
 
 function streamSessionEvents(session: RuntimeSession) {
@@ -1239,11 +1617,7 @@ function streamSessionEvents(session: RuntimeSession) {
 }
 
 function getSessionPayload(session: RuntimeSession): SessionPayload {
-  const status = session.lifecycle === "exited"
-    ? "exited"
-    : Date.now() - new Date(session.lastOutputAt).getTime() < idleThresholdMs
-      ? "busy"
-      : "idle";
+  const status = runtimeSessionStatus(session);
   const latestEventId = latestStdoutEventId(session);
   const suppressRedrawOutput = session.redrawGate.active;
   const emptyTerminal = suppressRedrawOutput

@@ -17,6 +17,7 @@
     "@codemirror/state": "^6.5.2",
     "@codemirror/view": "^6.38.8",
     "@fsegurai/codemirror-theme-bundle": "^6.4.2",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@openai/codex-sdk": "0.129.0",
     "@opencode-ai/sdk": "^1.14.41",
     "@orpc/client": "^1.14.3",

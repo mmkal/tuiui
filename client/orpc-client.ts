@@ -33,6 +33,12 @@ export async function callOrpcJsonApi<T>(path: string, init: RequestInit = {}): 
   if (method === "GET" && url.pathname === "/api/agent-sessions/recent") {
     return handled(await orpc.agentSessions.recent() as T);
   }
+  if (method === "GET" && url.pathname === "/api/coordinator") {
+    return handled(await orpc.coordinator.get() as T);
+  }
+  if (method === "POST" && url.pathname === "/api/coordinator/send") {
+    return handled(await orpc.coordinator.send(jsonBody(init)) as T);
+  }
   if (method === "GET" && url.pathname === "/api/codex-sessions/recent") {
     return handled(await orpc.codexSessions.recent() as T);
   }

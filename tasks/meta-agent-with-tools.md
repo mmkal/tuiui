@@ -5,7 +5,7 @@ size: large
 
 # Meta-Agent With Tools
 
-Status: Ready for implementation. The superseded coordinator-summary and factory-floor PRs were closed. The new direction is a Codex-only first cut: TUI UI owns deterministic TypeScript coordination functions, exposes them to a server-side Codex coordinator through MCP, and gives the user a normal browser chat surface for asking what agents are doing, where work overlaps, and what should be prompted next. Missing pieces are implementation, tests, and PR media if the UI changes warrant it.
+Status: Implementation in progress. The deterministic coordination functions, MCP tool wrapper, server-side coordinator state/routes, idle-event subscription hook, and browser coordinator route are in place. Focused deterministic/MCP tests and typecheck pass. Remaining work is server/browser integration coverage, full verification, PR body update, and moving the task to complete.
 
 ## Goal
 
@@ -47,12 +47,12 @@ The coordinator may inspect, brief, subscribe, and send prompts to managed sessi
 - [x] Close the two open superseded coordinator/factory-floor PRs. _Closed GitHub PR #9 and #8 with comments pointing to the new meta-agent-with-tools direction._
 - [x] Create a fresh bedtime branch/worktree and capture the kickoff task. _Created `bedtime/meta-agent-with-tools` in `../worktrees/tuiui/meta-agent-as-agent` and committed the initial task stub._
 - [x] Grill the main architecture decisions before implementation. _Recorded the grill transcript in `tasks/meta-agent-with-tools.interview.md`; the final recovery turn wedged, but the core decisions through coordinator surface, subscribe mechanics, agent handles, and clash detection are captured._
-- [ ] Add reusable TypeScript coordination functions for listing agents, reading briefings, prompting agents, subscriptions, and clash detection.
-- [ ] Expose the coordination functions as MCP tools that Codex can use from the SDK thread.
-- [ ] Add coordinator server state, ORPC/legacy JSON endpoints, and a serialized run queue for user prompts and idle-event injections.
-- [ ] Add a browser `/coordinator` chat surface and Home entry point.
-- [ ] Wire subscribed busy-to-idle transitions to coordinator event injection without auto-prompting worker agents.
-- [ ] Add unit tests for deterministic coordination functions and clash detection.
+- [x] Add reusable TypeScript coordination functions for listing agents, reading briefings, prompting agents, subscriptions, and clash detection. _Added `src/coordinator-tools.ts` with augmented agent handles, briefing selection, reusable git metadata, prompt/subscription result types, and deterministic clash detection._
+- [x] Expose the coordination functions as MCP tools that Codex can use from the SDK thread. _Added `src/coordinator-mcp.ts` with MCP tools `listAgents`, `getBriefing`, `promptAgent`, `subscribe`, and `findClashes`._
+- [x] Add coordinator server state, ORPC/legacy JSON endpoints, and a serialized run queue for user prompts and idle-event injections. _`cli.ts` now owns coordinator thread/message/audit/subscription state, `/api/coordinator`, ORPC coordinator routes, `/mcp/coordinator`, and a queued Codex SDK runner with fake mode for tests._
+- [x] Add a browser `/coordinator` chat surface and Home entry point. _`client/app.ts` and `client/styles.css` add a Home coordinator entry and a responsive coordinator chat/sidebar route._
+- [x] Wire subscribed busy-to-idle transitions to coordinator event injection without auto-prompting worker agents. _Subscribed managed sessions schedule an idle check and inject an event prompt into the coordinator queue on a busy-to-idle transition._
+- [x] Add unit tests for deterministic coordination functions and clash detection. _Added `test/coordinator-tools.test.ts` and `test/coordinator-mcp.test.ts`; both pass._
 - [ ] Add server/API tests for coordinator prompting, audit history, and subscription idle injection.
 - [ ] Add a focused Playwright spec for the coordinator route with fake agents.
 - [ ] Run typecheck, unit tests, and relevant Playwright specs.
@@ -79,3 +79,4 @@ The coordinator may inspect, brief, subscribe, and send prompts to managed sessi
 - Official Codex MCP/config docs describe MCP servers in `config.toml` or project `.codex/config.toml`, including stdio and streamable HTTP server entries.
 - The installed `@openai/codex-sdk@0.129.0` exposes `Codex.startThread`, `Codex.resumeThread`, repeated `Thread.run()`, config overrides, and MCP tool-call stream items, but not direct TypeScript callback tools.
 - The existing TUI UI session brief contract is already the right source for `getBriefing(agentId)` where available.
+- 2026-05-14: Implemented the first section and verified with `bun run typecheck` plus `bun test test/coordinator-tools.test.ts test/coordinator-mcp.test.ts`.
