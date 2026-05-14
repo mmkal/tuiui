@@ -1,5 +1,12 @@
 import { expect, test } from "bun:test";
-import { createAcknowledgement, createReadbackText, createVoiceLoop, type VoiceRecognizer, type VoiceSpeaker } from "../client/voice.ts";
+import {
+  createAcknowledgement,
+  createFallbackVoiceRecognizer,
+  createReadbackText,
+  createVoiceLoop,
+  type VoiceRecognizer,
+  type VoiceSpeaker,
+} from "../client/voice.ts";
 
 test("voice loop sends final transcripts and reads back after the session returns idle", async () => {
   let now = Date.parse("2026-05-11T10:00:00.000Z");
@@ -149,6 +156,37 @@ test("voice loop can be tested without a microphone or system speech", () => {
   });
 });
 
+test("voice recognizer falls back when realtime setup fails before transcription", () => {
+  const primary = fakeRecognizer("Realtime");
+  const fallback = fakeRecognizer("browser");
+  const recognizer = createFallbackVoiceRecognizer(primary, fallback);
+  const results: Array<{ transcript: string; final: boolean }> = [];
+  const errors: string[] = [];
+
+  recognizer.start({
+    onResult(result) {
+      results.push(result);
+    },
+    onError(message) {
+      errors.push(message);
+    },
+    onEnd() {
+    },
+  });
+
+  primary.fail("OPENAI_API_KEY is not configured");
+  fallback.emit({ transcript: "tell codex to check the PR", final: true });
+
+  expect(errors).toEqual([]);
+  expect(results).toEqual([
+    { transcript: "tell codex to check the PR", final: true },
+  ]);
+  expect(recognizer).toMatchObject({
+    supported: true,
+    label: "Realtime, browser fallback",
+  });
+});
+
 test("readback prefers SDK assistant text and falls back to trailing terminal text", () => {
   expect(createReadbackText({
     id: "session-1",
@@ -235,10 +273,14 @@ function message(role: string, text: string, createdAt: string) {
   return { role, text, createdAt };
 }
 
-function fakeRecognizer() {
+function fakeRecognizer(label = "browser") {
   let handlers: Parameters<VoiceRecognizer["start"]>[0] | null = null;
-  const recognizer: VoiceRecognizer & { emit: (result: { transcript: string; final: boolean }) => void } = {
+  const recognizer: VoiceRecognizer & {
+    emit: (result: { transcript: string; final: boolean }) => void;
+    fail: (message: string) => void;
+  } = {
     supported: true,
+    label,
     start(nextHandlers) {
       handlers = nextHandlers;
     },
@@ -249,6 +291,9 @@ function fakeRecognizer() {
     },
     emit(result) {
       handlers?.onResult(result);
+    },
+    fail(message) {
+      handlers?.onError(message);
     },
   };
   return recognizer;

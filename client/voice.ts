@@ -26,6 +26,7 @@ export type VoiceRecognitionResult = {
 
 export type VoiceRecognizer = {
   supported: boolean;
+  label?: string;
   start: (handlers: {
     onResult: (result: VoiceRecognitionResult) => void;
     onError: (message: string) => void;
@@ -45,6 +46,7 @@ export type VoiceLoopState = {
   status: "unsupported" | "idle" | "listening" | "transcribing" | "speaking" | "error";
   transcript: string;
   message: string;
+  providerLabel: string;
   awaitingReadback: boolean;
 };
 
@@ -66,11 +68,13 @@ export function createVoiceLoop(input: {
   minReadbackDelayMs: number;
 }) {
   const listeners = new Set<(state: VoiceLoopState) => void>();
+  const providerLabel = input.recognizer.label || "browser";
   const state: VoiceLoopState = {
     status: input.recognizer.supported && input.speaker.supported ? "idle" : "unsupported",
     transcript: "",
+    providerLabel,
     message: input.recognizer.supported && input.speaker.supported
-      ? "Voice ready"
+      ? `Voice ready (${providerLabel})`
       : "Voice is not supported in this browser",
     awaitingReadback: false,
   };
@@ -114,21 +118,21 @@ export function createVoiceLoop(input: {
     state,
     startListening() {
       if (!input.recognizer.supported || !input.speaker.supported) {
-        state.status = "unsupported";
-        state.message = "Voice is not supported in this browser";
-        emit();
+      state.status = "unsupported";
+      state.message = "Voice is not supported in this browser";
+      emit();
         return;
       }
       cancelled = false;
       state.status = "listening";
       state.transcript = "";
-      state.message = "Listening";
+      state.message = `Listening (${providerLabel})`;
       emit();
       input.recognizer.start({
         onResult(result) {
           state.transcript = result.transcript;
           state.status = result.final ? "transcribing" : "listening";
-          state.message = result.final ? "Transcribing" : "Listening";
+          state.message = result.final ? "Transcribing" : `Listening (${providerLabel})`;
           emit();
           if (result.final) {
             void acceptTranscript(result.transcript).catch((error) => {
@@ -148,7 +152,7 @@ export function createVoiceLoop(input: {
         onEnd() {
           if (state.status === "listening") {
             state.status = "idle";
-            state.message = "Voice ready";
+            state.message = `Voice ready (${providerLabel})`;
             emit();
           }
         },
@@ -228,6 +232,7 @@ export function createBrowserVoiceRecognizer(): VoiceRecognizer {
   let recognition: any = null;
   return {
     supported: Boolean(SpeechRecognition),
+    label: "browser",
     start(handlers) {
       if (!SpeechRecognition) {
         handlers.onError("Speech recognition is not supported in this browser");
@@ -263,6 +268,210 @@ export function createBrowserVoiceRecognizer(): VoiceRecognizer {
       recognition = null;
     },
   };
+}
+
+export function createPreferredBrowserVoiceRecognizer(): VoiceRecognizer {
+  return createFallbackVoiceRecognizer(
+    createRealtimeTranscriptionVoiceRecognizer({
+      endpoint: "/api/voice/realtime-transcription/sdp",
+      fetchImpl: window.fetch.bind(window),
+      mediaDevices: navigator.mediaDevices,
+      PeerConnection: window.RTCPeerConnection,
+    }),
+    createBrowserVoiceRecognizer(),
+  );
+}
+
+export function createFallbackVoiceRecognizer(primary: VoiceRecognizer, fallback: VoiceRecognizer): VoiceRecognizer {
+  let active: VoiceRecognizer = primary.supported ? primary : fallback;
+  return {
+    supported: primary.supported || fallback.supported,
+    label: primary.supported && fallback.supported ? `${primary.label || "primary"}, ${fallback.label || "fallback"} fallback` : active.label,
+    start(handlers) {
+      if (!primary.supported) {
+        active = fallback;
+        fallback.start(handlers);
+        return;
+      }
+      active = primary;
+      let emittedResult = false;
+      primary.start({
+        onResult(result) {
+          emittedResult = true;
+          handlers.onResult(result);
+        },
+        onError(message) {
+          if (!emittedResult && fallback.supported) {
+            active = fallback;
+            fallback.start(handlers);
+            return;
+          }
+          handlers.onError(message);
+        },
+        onEnd() {
+          handlers.onEnd();
+        },
+      });
+    },
+    stop() {
+      active.stop();
+    },
+    cancel() {
+      active.cancel();
+    },
+  };
+}
+
+export function createRealtimeTranscriptionVoiceRecognizer(input: {
+  endpoint: string;
+  fetchImpl: typeof fetch;
+  mediaDevices: MediaDevices | undefined;
+  PeerConnection: typeof RTCPeerConnection | undefined;
+}): VoiceRecognizer {
+  let session: RealtimeTranscriptionBrowserSession | null = null;
+  const supported = Boolean(input.PeerConnection && input.mediaDevices?.getUserMedia);
+  return {
+    supported,
+    label: "Realtime",
+    start(handlers) {
+      const mediaDevices = input.mediaDevices;
+      const PeerConnection = input.PeerConnection;
+      if (!supported || !PeerConnection || !mediaDevices) {
+        handlers.onError("Realtime transcription is not supported in this browser");
+        return;
+      }
+      const nextSession: RealtimeTranscriptionBrowserSession = {
+        cancelled: false,
+        transcript: "",
+        stream: null,
+        pc: null,
+        dc: null,
+      };
+      session = nextSession;
+      void startRealtimeTranscription({
+        endpoint: input.endpoint,
+        fetchImpl: input.fetchImpl,
+        mediaDevices,
+        PeerConnection,
+      }, nextSession, handlers).catch((error) => {
+        closeRealtimeTranscriptionSession(nextSession);
+        if (!nextSession.cancelled) {
+          handlers.onError(String(error instanceof Error ? error.message : error));
+        }
+      });
+    },
+    stop() {
+      if (!session) {
+        return;
+      }
+      if (session.dc?.readyState === "open") {
+        session.dc.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+      }
+      for (const track of session.stream?.getTracks() || []) {
+        track.stop();
+      }
+    },
+    cancel() {
+      if (!session) {
+        return;
+      }
+      session.cancelled = true;
+      closeRealtimeTranscriptionSession(session);
+      session = null;
+    },
+  };
+}
+
+type RealtimeTranscriptionBrowserSession = {
+  cancelled: boolean;
+  transcript: string;
+  stream: MediaStream | null;
+  pc: RTCPeerConnection | null;
+  dc: RTCDataChannel | null;
+};
+
+async function startRealtimeTranscription(
+  input: {
+    endpoint: string;
+    fetchImpl: typeof fetch;
+    mediaDevices: MediaDevices;
+    PeerConnection: typeof RTCPeerConnection;
+  },
+  session: RealtimeTranscriptionBrowserSession,
+  handlers: Parameters<VoiceRecognizer["start"]>[0],
+) {
+  const pc = new input.PeerConnection();
+  session.pc = pc;
+  session.stream = await input.mediaDevices.getUserMedia({ audio: true });
+  for (const track of session.stream.getTracks()) {
+    pc.addTrack(track, session.stream);
+  }
+  const dc = pc.createDataChannel("oai-events");
+  session.dc = dc;
+  dc.addEventListener("message", (event) => {
+    handleRealtimeTranscriptionEvent(session, handlers, String(event.data || ""));
+  });
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  const offerSdp = offer.sdp || pc.localDescription?.sdp || "";
+  const response = await input.fetchImpl(input.endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/sdp",
+    },
+    body: offerSdp,
+  });
+  const answerSdp = await response.text();
+  if (!response.ok) {
+    throw new Error(answerSdp || `Realtime transcription setup failed (${response.status})`);
+  }
+  await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+}
+
+function handleRealtimeTranscriptionEvent(
+  session: RealtimeTranscriptionBrowserSession,
+  handlers: Parameters<VoiceRecognizer["start"]>[0],
+  rawEvent: string,
+) {
+  const event = parseRealtimeEvent(rawEvent);
+  if (!event || session.cancelled) {
+    return;
+  }
+  if (event.type === "conversation.item.input_audio_transcription.delta") {
+    session.transcript += String(event.delta || "");
+    handlers.onResult({ transcript: session.transcript, final: false });
+    return;
+  }
+  if (event.type === "conversation.item.input_audio_transcription.completed") {
+    const transcript = String(event.transcript || session.transcript).trim();
+    handlers.onResult({ transcript, final: true });
+    closeRealtimeTranscriptionSession(session);
+    handlers.onEnd();
+    return;
+  }
+  if (event.type === "error") {
+    closeRealtimeTranscriptionSession(session);
+    handlers.onError(String(event.error?.message || "Realtime transcription failed"));
+  }
+}
+
+function parseRealtimeEvent(rawEvent: string): any {
+  try {
+    return JSON.parse(rawEvent);
+  } catch {
+    return null;
+  }
+}
+
+function closeRealtimeTranscriptionSession(session: RealtimeTranscriptionBrowserSession) {
+  for (const track of session.stream?.getTracks() || []) {
+    track.stop();
+  }
+  session.stream = null;
+  session.dc?.close();
+  session.dc = null;
+  session.pc?.close();
+  session.pc = null;
 }
 
 export function createBrowserVoiceSpeaker(): VoiceSpeaker {
