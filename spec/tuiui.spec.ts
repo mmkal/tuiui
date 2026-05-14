@@ -231,11 +231,10 @@ test("launches the coordinator as a normal TUI session with MCP tools", async ({
   await page.getByRole("group", { name: "Shortcuts" }).getByRole("button", { name: "coordinator", exact: true }).click();
 
   await expect(page).toHaveURL(/\/sessions\/tuiui_[a-f0-9]+$/);
-  await expect(page.getByTestId("rendered-terminal")).toContainText("OpenAI Codex");
+  await expect(page.getByTestId("rendered-terminal")).toContainText("TUI UI's coordinator agent");
   const payload = await fetchSessionPayload(page);
   expect(payload).toMatchObject({
-    command: expect.stringContaining("fakeagent"),
-    title: expect.stringContaining("codex"),
+    command: "codex",
   });
   expect(payload.args.join(" ")).toContain("/mcp/coordinator");
   expect(payload.args.join(" ")).toContain("enabled_tools");

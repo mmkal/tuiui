@@ -1,11 +1,11 @@
 ---
-status: in-progress
+status: complete
 size: large
 ---
 
 # Meta-Agent With Tools
 
-Status: Implementation pivot is in place and the focused coordinator runtime tests are passing. The reusable coordination tools and MCP wrapper remain the foundation. The browser-specific coordinator chat route, server-side SDK thread, fake coordinator mode, and coordinator-specific UI have been removed. Remaining work is full verification, fresh PR media/body, demo refresh, and moving this task back to complete.
+Status: Done. The coordinator is now a normal managed Codex session rendered through the existing TUI, backed by deterministic TypeScript coordination tools exposed over a token-protected MCP endpoint. The custom `/coordinator` browser UI, server-side SDK thread, fake coordinator mode, and coordinator-specific ORPC chat state have been removed. Full typecheck, Bun tests, and Playwright specs are green; fresh PR media and the Tailscale demo link are in the PR body.
 
 ## Goal
 
@@ -61,8 +61,8 @@ The coordinator may inspect, brief, subscribe, and send prompts to managed sessi
 - [x] Replace server/ORPC coordinator tests with managed-session MCP tests. _Added `test/coordinator-runtime.test.ts`, which exercises MCP auth, list/brief/clash tools, prompt forwarding, and idle-event injection through normal session APIs._
 - [x] Replace the Playwright coordinator-route spec with normal session launch coverage. _Updated `spec/tuiui.spec.ts` so the browser proof launches a coordinator session through the existing TUI route, not a bespoke coordinator page._
 - [x] Grill and document the managed-session authority decision. _Captured the pivot grill in `tasks/meta-agent-with-tools.pivot-grill.md` and revised `docs/adr/0002-meta-agent-with-tools.md` to record the normal-session architecture plus consumed prompt grants._
-- [ ] Run typecheck, unit tests, Playwright specs, and update PR media/body. _The PR body needs fresh screenshots or video of the normal TUI coordinator flow plus the Tailscale demo link._
-- [ ] Move this task back to `tasks/complete/` once the PR branch is complete. _Keep it open until the pivot is implemented and verified._
+- [x] Run typecheck, unit tests, Playwright specs, and update PR media/body. _Full verification passed with `bun run typecheck`, `bun test test`, and `bun run spec`; fresh normal-session screenshot/video assets were captured from the coordinator launch spec for the PR body._
+- [x] Move this task back to `tasks/complete/` once the PR branch is complete. _Moved back to `tasks/complete/2026-05-14-meta-agent-with-tools.md` after the pivot and verification were complete._
 
 ## Guesses And Assumptions
 
@@ -96,3 +96,4 @@ The coordinator may inspect, brief, subscribe, and send prompts to managed sessi
 - 2026-05-14: Product review rejected the custom coordinator UI. The next pass treats the coordinator as a normal Codex session rendered through the existing TUI, with only its tools and role prompt made special.
 - 2026-05-14: Replaced the server-side SDK thread and custom browser route with a coordinator launch preset. Focused verification passed with `bun run typecheck` and `bun test test/coordinator-runtime.test.ts test/coordinator-tools.test.ts test/coordinator-mcp.test.ts`.
 - 2026-05-14: Ran the requested grill-you pass for the managed-session authority model. The resulting hardening consumes one `promptAgent` grant per target per latest coordinator stdin event.
+- 2026-05-14: Final verification passed with `bun run typecheck`, `bun test test`, and `bun run spec`. Captured fresh PR media from `VIDEO_MODE=1 bun run spec --grep "launches the coordinator"` and trimmed it with `bun spec/plugins/video-mode.ts trim`.
