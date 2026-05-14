@@ -32,6 +32,11 @@ import {
   type VoiceRecognizer,
   type VoiceSpeaker,
 } from "./voice.ts";
+import {
+  factoryRecentSessionKey,
+  renderFactoryFloorOverview,
+  type FactoryFloorRecentSession,
+} from "./factory-floor.ts";
 
 type SessionPayload = {
   id: string;
@@ -550,7 +555,7 @@ async function primeIdleNotificationSnapshotForCurrentRoute() {
     idleNotifications.primeOne(sessionPayloadIdleNotification(activeSession));
     return;
   }
-  if (location.pathname !== "/" && location.pathname !== "/sessions") {
+  if (location.pathname !== "/" && location.pathname !== "/sessions" && location.pathname !== "/factory-floor") {
     return;
   }
   try {
@@ -574,7 +579,7 @@ function startIdleNotificationPollingForCurrentRoute() {
     scheduleSessionIdleRefresh(activeSession);
     return;
   }
-  if (location.pathname === "/" || location.pathname === "/sessions") {
+  if (location.pathname === "/" || location.pathname === "/sessions" || location.pathname === "/factory-floor") {
     startHomeIdleNotificationPolling(homeIdleNotificationDisplayDirs);
   }
 }
@@ -727,6 +732,11 @@ async function renderRoute() {
     return;
   }
 
+  if (location.pathname === "/factory-floor") {
+    await renderFactoryFloorHome();
+    return;
+  }
+
   await renderHome();
 }
 
@@ -788,6 +798,7 @@ async function renderHome() {
       <header class="topbar">
         <a class="brand" href="/">tuiui</a>
         <span class="muted" data-testid="session-count">${sessions.length} sessions</span>
+        <a class="view-switch-link" href="/factory-floor">Factory floor</a>
         ${renderIdleNotificationControl()}
       </header>
       <section class="launcher" aria-label="Launch session">
@@ -1018,6 +1029,267 @@ async function renderHome() {
   }
 }
 
+async function renderFactoryFloorHome() {
+  const [cwd, sessions, commands] = await Promise.all([
+    clientApi.cwd(),
+    clientApi.sessions.list(),
+    clientApi.commands(),
+  ]);
+  const displayHomeDirs = homeDirsForDisplay(cwd);
+  homeIdleNotificationDisplayDirs = displayHomeDirs;
+  observeHomeIdleNotificationSessions(sessions, [], displayHomeDirs);
+  const launchCwdState = useLocalStorageState("tuiui-launch-cwd", cwd.cwd);
+  const launchCwdValue = launchCwdState.getValue() || cwd.cwd;
+  const launchCommandOrder = ["coordinator", "codex", "claude", "opencode"];
+  const quickLaunchCommands = launchCommandOrder
+    .map((id) => commands.find((command) => command.id === id && !command.fakeAgent))
+    .filter((command): command is CommandPreset => Boolean(command));
+  let loadedRecentAgentSessions: RecentAgentSession[] | null = null;
+
+  app.innerHTML = `
+    <main class="layout factory-floor-layout">
+      <header class="topbar factory-floor-topbar">
+        <a class="brand" href="/">tuiui</a>
+        <span class="muted" data-testid="session-count">${sessions.length} sessions</span>
+        <a class="view-switch-link" href="/">List view</a>
+        ${renderIdleNotificationControl()}
+      </header>
+      <section class="launcher factory-launcher" aria-label="Launch session">
+        <form id="factory-launch-form" class="launch-form">
+          <div class="launch-command-row">
+            <label class="command-prompt-field">
+              <span class="command-prompt-glyph" aria-hidden="true">&gt;</span>
+              <input name="commandLine" aria-label="Command" autocomplete="off" required placeholder="codex --yolo" />
+            </label>
+            <label class="cwd-field">
+              <span aria-hidden="true">cwd</span>
+              <input name="cwd" aria-label="Working directory" autocomplete="off" required value="${escapeAttr(formatPathForDisplay(launchCwdValue, displayHomeDirs))}" />
+            </label>
+          </div>
+          <div class="quick-launch-row" role="group" aria-label="Shortcuts">
+            <div class="quick-launch-buttons">
+              ${quickLaunchCommands.map((command) => `
+                <button
+                  type="button"
+                  class="preset-button"
+                  data-preset-id="${escapeAttr(command.id)}"
+                  aria-label="${escapeAttr(command.coordinator ? "coordinator" : command.command)}"
+                  title="${escapeAttr(command.command)}"
+                >${escapeHtml(command.label || command.command)}</button>
+              `).join("")}
+            </div>
+            <label class="fakeagent-toggle">
+              <input name="fakeagent" type="checkbox" aria-label="fakeagent" />
+              <span>fakeagent</span>
+            </label>
+          </div>
+        </form>
+      </section>
+      <div data-factory-floor-mount>
+        ${renderFactoryFloorOverview({
+          sessions,
+          recentAgentSessions: null,
+          displayHomeDirs,
+          nowMs: Date.now(),
+        })}
+      </div>
+    </main>
+  `;
+  bindIdleNotificationControls();
+  startHomeIdleNotificationPolling(displayHomeDirs);
+
+  const form = document.getElementById("factory-launch-form") as HTMLFormElement;
+  const commandInput = form.elements.namedItem("commandLine") as HTMLInputElement;
+  const cwdInput = form.elements.namedItem("cwd") as HTMLInputElement;
+  const fakeAgentInput = form.elements.namedItem("fakeagent") as HTMLInputElement;
+  const presets = new Map(commands.map((command) => [command.id, command]));
+
+  cwdInput.addEventListener("input", () => {
+    launchCwdState.setValue(resolveLaunchCwd(cwdInput.value));
+  });
+  commandInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) {
+      return;
+    }
+    event.preventDefault();
+    void submitLaunchForm();
+  });
+
+  for (const button of form.querySelectorAll<HTMLButtonElement>("[data-preset-id]")) {
+    button.addEventListener("click", async () => {
+      const preset = presets.get(button.dataset.presetId || "");
+      if (!preset) {
+        return;
+      }
+      commandInput.value = [preset.command, ...preset.args].join(" ");
+      await launchSession({
+        command: preset.command,
+        args: preset.args,
+        cwd: currentLaunchCwd(),
+        fakeAgent: fakeAgentForCommand(preset.command),
+        coordinator: Boolean(preset.coordinator),
+      });
+    });
+  }
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await submitLaunchForm();
+  });
+
+  bindFactoryFloorStationControls([]);
+  void loadRecentAgentSessions();
+
+  async function loadRecentAgentSessions() {
+    try {
+      const recentAgentSessions = await clientApi.agentSessions.recent();
+      if (!form.isConnected) {
+        return;
+      }
+      loadedRecentAgentSessions = recentAgentSessions;
+      observeHomeIdleNotificationSessions(sessions, recentAgentSessions, displayHomeDirs);
+      renderFactoryFloor(recentAgentSessions, "");
+    } catch {
+      renderFactoryFloor([], "Recent sessions unavailable");
+    }
+  }
+
+  function renderFactoryFloor(recentAgentSessions: RecentAgentSession[], error: string) {
+    const mount = document.querySelector<HTMLElement>("[data-factory-floor-mount]");
+    if (!mount) {
+      return;
+    }
+    mount.innerHTML = `
+      ${renderFactoryFloorOverview({
+        sessions,
+        recentAgentSessions,
+        displayHomeDirs,
+        nowMs: Date.now(),
+      })}
+      ${error ? `<p class="factory-floor-error" data-testid="factory-floor-error">${escapeHtml(error)}</p>` : ""}
+    `;
+    bindFactoryFloorStationControls(recentAgentSessions);
+  }
+
+  function bindFactoryFloorStationControls(recentAgentSessions: RecentAgentSession[]) {
+    const recentAgentSessionsByKey = new Map(
+      recentAgentSessions.map((session) => [factoryRecentSessionKey(session as FactoryFloorRecentSession), session]),
+    );
+    for (const button of document.querySelectorAll<HTMLButtonElement>("[data-action='factory-resume-agent-session']")) {
+      button.addEventListener("click", async () => {
+        const session = recentAgentSessionsByKey.get(button.dataset.agentSessionId || "");
+        if (!session) {
+          return;
+        }
+        commandInput.value = [session.command, ...session.args].join(" ");
+        setLaunchCwd(session.cwd || currentLaunchCwd());
+        await launchSession({
+          command: session.command,
+          args: session.args,
+          cwd: session.cwd || currentLaunchCwd(),
+          fakeAgent: "",
+          coordinator: false,
+        });
+      });
+    }
+    for (const button of document.querySelectorAll<HTMLButtonElement>("[data-action='factory-archive-session']")) {
+      button.addEventListener("click", async () => {
+        const sessionId = button.dataset.sessionId || "";
+        if (!sessionId) {
+          return;
+        }
+        button.disabled = true;
+        try {
+          await clientApi.sessions.archive({ sessionId });
+          await renderRoute();
+        } catch (error) {
+          button.disabled = false;
+          showRequestErrorToast("Stop station failed", error, "factory-stop-error-toast");
+        }
+      });
+    }
+    for (const promptForm of document.querySelectorAll<HTMLFormElement>("[data-action='factory-prompt-form']")) {
+      promptForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const input = promptForm.elements.namedItem("text") as HTMLInputElement;
+        const text = input.value.trim();
+        const sessionId = promptForm.dataset.sessionId || "";
+        if (!text || !sessionId) {
+          return;
+        }
+        input.disabled = true;
+        try {
+          await clientApi.sessions.send({ sessionId, text, submit: true });
+          input.value = "";
+          showToast({
+            title: "Prompt sent",
+            message: "Station input was sent to the terminal.",
+            durationMs: 2_500,
+          });
+        } catch (error) {
+          showRequestErrorToast("Send station prompt failed", error, "factory-send-error-toast");
+        } finally {
+          input.disabled = false;
+        }
+      });
+    }
+  }
+
+  async function submitLaunchForm() {
+    const commandLine = parseCommandLine(commandInput.value);
+    if (!commandLine.command) {
+      return;
+    }
+    await launchSession({
+      command: commandLine.command,
+      args: commandLine.args,
+      cwd: currentLaunchCwd(),
+      fakeAgent: fakeAgentForCommand(commandLine.command),
+      coordinator: false,
+    });
+  }
+
+  function currentLaunchCwd() {
+    const value = resolveLaunchCwd(cwdInput.value);
+    launchCwdState.setValue(value);
+    return value;
+  }
+
+  function setLaunchCwd(value: string) {
+    const resolved = resolveLaunchCwd(value);
+    cwdInput.value = formatPathForDisplay(resolved, displayHomeDirs);
+    launchCwdState.setValue(resolved);
+  }
+
+  function resolveLaunchCwd(value: string) {
+    return expandDisplayPath(value, displayHomeDirs);
+  }
+
+  function fakeAgentForCommand(command: string) {
+    if (!fakeAgentInput.checked) {
+      return "";
+    }
+    const binary = command.split(/[\\/]/).pop() || command;
+    const fakeCommand = commands.find((candidate) => candidate.fakeAgent && candidate.command === binary);
+    return fakeCommand ? fakeCommand.fakeAgent : "";
+  }
+
+  async function launchSession(input: LaunchSessionInput) {
+    const result = await clientApi.sessions.create({
+      command: input.command,
+      args: input.args,
+      cwd: input.cwd,
+      cols: 120,
+      rows: 42,
+      env: {},
+      fakeAgent: input.fakeAgent,
+      coordinator: Boolean(input.coordinator),
+    });
+    history.pushState({}, "", `/sessions/${result.id}`);
+    await renderRoute();
+  }
+}
+
 function renderRecentSessionGroupError(message: string) {
   const error = document.querySelector<HTMLElement>("[data-testid='recent-session-group-error']");
   if (!error) {
@@ -1132,7 +1404,7 @@ function renderRecentSessionGroups(
   return `
     <div class="recent-session-groups" data-depth="${depth}">
       ${groups.map((group) => `
-        <details class="recent-session-group" data-depth="${depth}">
+        <details class="recent-session-group" data-depth="${depth}"${depth === 0 && groups.length === 1 ? " open" : ""}>
           <summary>
             <span class="recent-session-group-title">
               <code>${escapeHtml(group.name)}</code>

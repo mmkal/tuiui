@@ -1,5 +1,5 @@
 ---
-status: ready
+status: done
 size: large
 branch: bedtime/factory-floor-skeuomorphism
 base: nightly/2026-05-14
@@ -7,7 +7,7 @@ base: nightly/2026-05-14
 
 # Factory Floor Agent UI
 
-Status: Ready for a second implementation attempt. The direction is now explicitly skeuomorphic and Isomux-inspired, but reframed as a factory floor for TUI UI. The first slice should be an alternate overview, not a replacement for the current home/session UI. It should use generated bitmap art for the room/background/characters, with interactive HTML overlays for real sessions.
+Status: First skeuomorphic overview slice is PR-ready. `/factory-floor` now renders active TUI sessions and recent provider sessions as factory stations over generated bitmap art, with HTML labels/controls for open, resume, stop, and prompt-send. Missing pieces are richer task/branch/PR badges and deeper interaction polish after the visual grammar has had review.
 
 ## Goal
 
@@ -59,16 +59,16 @@ Generated assets should be treated as replaceable first-pass art. Keep overlays 
 
 ## Checklist
 
-- [ ] Audit the current session list/detail UI and identify the data needed for a factory-floor overview.
-- [ ] Sketch the factory-floor information architecture: stations, lanes, queues, inspection area, and detail drawer. _Keep this in the task file or PR body; a lightweight implementation note is enough._
-- [ ] Generate first-pass bitmap assets with imagegen and commit them under `public/factory-floor/`.
-- [ ] Define visual state mapping for busy, idle, waiting-for-user, exited, errored, reviewing, and stale sessions.
-- [ ] Build a first responsive overview route or mode that shows active and recent sessions as stations over the generated floor art.
-- [ ] Preserve one-click access to the terminal/session detail for each station.
-- [ ] Add compact controls for spawning, resuming, stopping, and sending a prompt to an agent.
-- [ ] Integrate task/branch/PR/status summary data when available, without blocking the first UI on perfect metadata.
-- [ ] Add mobile layout behavior that keeps the overview scannable and makes station controls touch-friendly.
-- [ ] Add Playwright coverage for the overview states and at least one screenshot/video artifact for PR review.
+- [x] Audit the current session list/detail UI and identify the data needed for a factory-floor overview. _Used `clientApi.sessions.list()` for active stations and `clientApi.agentSessions.recent()` for provider recents._
+- [x] Sketch the factory-floor information architecture: stations, lanes, queues, inspection area, and detail drawer. _Implemented eight fixed floor bays, a queued overflow strip, a status legend, station nametags, and per-station controls in `client/factory-floor.ts`._
+- [x] Generate first-pass bitmap assets with imagegen and commit them under `public/factory-floor/`. _Generated `background.png`, `station-atlas.png`, and `agent-sprites.png`; sprite sheets were chroma-keyed to RGBA assets._
+- [x] Define visual state mapping for busy, idle, waiting-for-user, exited, errored, reviewing, and stale sessions. _Mapped active lifecycle/status plus recent message heuristics in `stateForActiveSession` and `stateForRecentSession`._
+- [x] Build a first responsive overview route or mode that shows active and recent sessions as stations over the generated floor art. _Added `/factory-floor`, served by the SPA shell and linked from Home._
+- [x] Preserve one-click access to the terminal/session detail for each station. _Active station cards include direct `Open terminal` links to `/sessions/:id`; recent station cards resume into a real TUI session._
+- [x] Add compact controls for spawning, resuming, stopping, and sending a prompt to an agent. _The route keeps the launcher shortcuts, recent resume buttons, active stop buttons, and active prompt forms._
+- [x] Integrate task/branch/PR/status summary data when available, without blocking the first UI on perfect metadata. _Included available provider, cwd, message snippet, time, and state labels; branch/PR/task badges remain a follow-up because the home payload does not carry them yet._
+- [x] Add mobile layout behavior that keeps the overview scannable and makes station controls touch-friendly. _Desktop uses positioned station overlays; mobile converts the floor into a scannable station stack with the room art as a header._
+- [x] Add Playwright coverage for the overview states and at least one screenshot/video artifact for PR review. _Added `renders a skeuomorphic factory floor overview with stateful station controls`; it attaches `factory-floor-overview.png`._
 
 ## Open Questions
 
@@ -82,3 +82,4 @@ Generated assets should be treated as replaceable first-pass art. Keep overlays 
 
 - 2026-05-13: Captured task after reviewing Isomux's published feature list and reframing the desired UI as a factory-floor operations view for TUI UI.
 - 2026-05-14: Re-scoped after product feedback: make the retry visibly skeuomorphic, inspect Isomux source, and use generated bitmap assets rather than only CSS boxes.
+- 2026-05-14: Implemented the first slice in `client/factory-floor.ts`, `client/app.ts`, and `client/styles.css`; added generated assets under `public/factory-floor/`; verified with full unit and Playwright suites.

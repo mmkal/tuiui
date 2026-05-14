@@ -454,6 +454,158 @@ test("exposes real and fake launcher presets as one-click button rows", async ({
   });
 });
 
+test("renders a skeuomorphic factory floor overview with stateful station controls", async ({ page, ctx }, testInfo) => {
+  const now = new Date();
+  const stale = new Date(now.getTime() - 8 * 60 * 60 * 1000);
+  const activeSessions = [
+    {
+      id: "tuiui_busy_factory",
+      title: "Active welder",
+      command: "codex",
+      args: ["--yolo"],
+      cwd: ctx.workspaceDir,
+      updatedAt: now.toISOString(),
+      lifecycle: "running",
+      status: "busy",
+    },
+    {
+      id: "tuiui_idle_factory",
+      title: "Idle packer",
+      command: "claude",
+      args: [],
+      cwd: ctx.workspaceDir,
+      updatedAt: now.toISOString(),
+      lifecycle: "running",
+      status: "idle",
+    },
+    {
+      id: "tuiui_exited_factory",
+      title: "Exited cutter",
+      command: "opencode",
+      args: [],
+      cwd: ctx.workspaceDir,
+      updatedAt: stale.toISOString(),
+      lifecycle: "exited",
+      status: "exited",
+    },
+  ];
+  const recentSessions = [
+    factoryRecentFixture({
+      provider: "codex",
+      id: "review-pr-19",
+      title: "Review PR #19",
+      cwd: ctx.workspaceDir,
+      latestUserText: "review the skeuomorphic factory PR",
+      latestAssistantText: "Inspecting the diff.",
+      messageAt: now.toISOString(),
+      status: "idle",
+    }),
+    factoryRecentFixture({
+      provider: "opencode",
+      id: "waiting-approval",
+      title: "Waiting for approval",
+      cwd: ctx.workspaceDir,
+      latestUserText: "needs user approval before continuing",
+      latestAssistantText: "Waiting for user input.",
+      messageAt: now.toISOString(),
+      status: "idle",
+    }),
+    factoryRecentFixture({
+      provider: "claude",
+      id: "stale-research",
+      title: "Stale research",
+      cwd: ctx.workspaceDir,
+      latestUserText: "summarise old session",
+      latestAssistantText: "Finished earlier.",
+      messageAt: stale.toISOString(),
+      status: "idle",
+    }),
+    factoryRecentFixture({
+      provider: "codex",
+      id: "recent-handoff",
+      title: "Recent handoff",
+      cwd: ctx.workspaceDir,
+      latestUserText: "continue factory floor",
+      latestAssistantText: "Ready for a resume.",
+      messageAt: now.toISOString(),
+      status: "idle",
+    }),
+    factoryRecentFixture({
+      provider: "opencode",
+      id: "failed-scan",
+      title: "Failed scan",
+      cwd: ctx.workspaceDir,
+      latestUserText: "run the scan",
+      latestAssistantText: "Error: scan failed.",
+      messageAt: now.toISOString(),
+      status: "idle",
+    }),
+  ];
+
+  await page.route("**/rpc/sessions/list", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: orpcJsonBody(activeSessions),
+    });
+  });
+  await page.route("**/rpc/agentSessions/recent", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: orpcJsonBody(recentSessions),
+    });
+  });
+  await page.route("**/rpc/sessions/get", async (route) => {
+    const payload = fakeSessionPayload({ id: "tuiui_busy_factory", status: "busy" });
+    payload.title = "Active welder";
+    payload.command = "codex";
+    payload.cwd = ctx.workspaceDir;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: orpcJsonBody(payload),
+    });
+  });
+
+  await page.setViewportSize({ width: 1280, height: 760 });
+  await page.goto(`${ctx.baseUrl}/factory-floor`);
+
+  await expect(page.getByTestId("factory-station-count")).toHaveText("8 stations");
+  await expect(page.getByTestId("factory-floor-stage")).toHaveCSS("background-image", /url\(/);
+  await expect(page.getByTestId("factory-station")).toHaveCount(8);
+  await expect(page.getByTestId("factory-state-busy")).toBeVisible();
+  await expect(page.getByTestId("factory-state-idle")).toBeVisible();
+  await expect(page.getByTestId("factory-state-waiting")).toBeVisible();
+  await expect(page.getByTestId("factory-state-reviewing")).toBeVisible();
+  await expect(page.getByTestId("factory-state-recent")).toBeVisible();
+  await expect(page.getByTestId("factory-state-stale")).toBeVisible();
+  await expect(page.getByTestId("factory-state-exited")).toBeVisible();
+  await expect(page.getByTestId("factory-state-errored")).toBeVisible();
+  await expect(page.getByTestId("factory-station-state").filter({ hasText: "busy" })).toBeVisible();
+  await expect(page.getByTestId("factory-station-state").filter({ hasText: "idle" })).toBeVisible();
+  await expect(page.getByTestId("factory-station-state").filter({ hasText: "waiting for user" })).toBeVisible();
+  await expect(page.getByTestId("factory-station-state").filter({ hasText: "reviewing" })).toBeVisible();
+  await expect(page.getByTestId("factory-station-state").filter({ hasText: "recent" })).toBeVisible();
+  await expect(page.getByTestId("factory-station-state").filter({ hasText: "stale" })).toBeVisible();
+  await expect(page.getByTestId("factory-station-state").filter({ hasText: "exited" })).toBeVisible();
+  await expect(page.getByTestId("factory-station-state").filter({ hasText: "errored" })).toBeVisible();
+  await expect(page.getByRole("link", { name: /Open terminal for Active welder/ })).toHaveAttribute("href", "/sessions/tuiui_busy_factory");
+  await expect(page.getByRole("button", { name: "Stop" }).first()).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Prompt station 1" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Resume Codex session Review PR #19/ })).toBeVisible();
+
+  const screenshotPath = testInfo.outputPath("factory-floor-overview.png");
+  await page.getByTestId("factory-floor-root").screenshot({ path: screenshotPath });
+  await testInfo.attach("factory-floor-overview", {
+    path: screenshotPath,
+    contentType: "image/png",
+  });
+
+  await page.getByRole("link", { name: /Open terminal for Active welder/ }).click();
+  await expect(page).toHaveURL(/\/sessions\/tuiui_busy_factory$/);
+});
+
 test("renders home before recent agent sessions finish loading", async ({ page, ctx }) => {
   let releaseRecentSessions!: () => void;
   const recentSessionsReady = new Promise<void>((resolve) => {
@@ -1513,6 +1665,55 @@ function fakeSessionPayload(input: { id: string; status: "busy" | "idle" }) {
 
 function orpcJsonBody(value: unknown) {
   return JSON.stringify({ json: value });
+}
+
+function factoryRecentFixture(input: {
+  provider: "codex" | "opencode" | "claude";
+  id: string;
+  title: string;
+  cwd: string;
+  latestUserText: string;
+  latestAssistantText: string;
+  messageAt: string;
+  status: "busy" | "idle";
+}) {
+  return {
+    provider: input.provider,
+    id: input.id,
+    title: input.title,
+    cwd: input.cwd,
+    updatedAt: input.messageAt,
+    lastMessageAt: input.messageAt,
+    lastMessageText: input.latestAssistantText || input.latestUserText,
+    initialUserText: input.latestUserText,
+    latestUserText: input.latestUserText,
+    userMessageCount: 1,
+    latestAssistantText: input.latestAssistantText,
+    messageCount: input.latestAssistantText ? 2 : 1,
+    status: input.status,
+    command: commandForProvider(input.provider),
+    args: resumeArgsForProvider(input.provider, input.id),
+  };
+}
+
+function commandForProvider(provider: "codex" | "opencode" | "claude") {
+  if (provider === "opencode") {
+    return "opencode";
+  }
+  if (provider === "claude") {
+    return "claude";
+  }
+  return "codex";
+}
+
+function resumeArgsForProvider(provider: "codex" | "opencode" | "claude", id: string) {
+  if (provider === "claude") {
+    return ["--resume", id];
+  }
+  if (provider === "opencode") {
+    return ["run", id];
+  }
+  return ["resume", id];
 }
 
 async function fetchTuishot(page: Page) {
