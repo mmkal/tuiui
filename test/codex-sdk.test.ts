@@ -9,6 +9,7 @@ import {
   createCodexSummaryPrompt,
   discardCodexThreadFromDatabasePath,
   readCodexThreadsFromDatabasePath,
+  readRecentCodexSessionsFromDatabasePath,
   recentCodexSessionsFromThreads,
   resolveCodexStateDatabasePathForEnv,
   resolveCodexThread,
@@ -159,6 +160,28 @@ test("lists recent Codex sessions by latest visible message", () => {
       lastMessageText: "resume this on mobile",
       messageCount: 1,
       status: "busy",
+    },
+  ]);
+});
+
+test("skips stale Codex database rows before reading rollout transcripts", () => {
+  using workspace = createTempWorkspace();
+  const nowMs = Date.parse("2026-05-11T12:00:00.000Z");
+  const databasePath = path.join(workspace.path, "state_5.sqlite");
+  const recentRollout = path.join(workspace.path, "recent.jsonl");
+  fs.writeFileSync(recentRollout, rolloutMessage("2026-05-11T11:59:00.000Z", "user", "recent ask"));
+  createCodexThreadDatabase(
+    databasePath,
+    codexThread("stale-broken", "/repo", "2026-05-09T09:00:00.000Z", "2026-05-09T09:30:00.000Z", workspace.path),
+    codexThread("recent", "/repo", "2026-05-11T11:00:00.000Z", "2026-05-11T11:59:00.000Z", recentRollout),
+  );
+
+  const sessions = readRecentCodexSessionsFromDatabasePath(databasePath, nowMs);
+
+  expect(sessions).toMatchObject([
+    {
+      id: "recent",
+      latestUserText: "recent ask",
     },
   ]);
 });
@@ -316,7 +339,7 @@ function structuredSessionBriefPrompt(provider: string) {
   ].join("\n");
 }
 
-function createCodexThreadDatabase(databasePath: string, thread: CodexThreadRow) {
+function createCodexThreadDatabase(databasePath: string, ...threads: CodexThreadRow[]) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const database = new Database(databasePath);
   try {
@@ -338,34 +361,50 @@ function createCodexThreadDatabase(databasePath: string, thread: CodexThreadRow)
         updated_at_ms integer,
         archived integer not null default 0
       );
+    `);
+    const insert = database.query(`
       insert into threads (
         id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
         tokens_used, first_user_message, model, reasoning_effort, created_at_ms, updated_at_ms, archived
       ) values (
-        '${sqlString(thread.id)}',
-        '${sqlString(thread.rollout_path)}',
-        ${thread.created_at},
-        ${thread.updated_at},
-        '${sqlString(thread.source)}',
-        '${sqlString(thread.model_provider)}',
-        '${sqlString(thread.cwd)}',
-        '${sqlString(thread.title)}',
-        ${thread.tokens_used},
-        '${sqlString(thread.first_user_message)}',
-        '${sqlString(thread.model)}',
-        '${sqlString(thread.reasoning_effort)}',
-        ${thread.created_at_ms},
-        ${thread.updated_at_ms},
+        $id,
+        $rolloutPath,
+        $createdAt,
+        $updatedAt,
+        $source,
+        $modelProvider,
+        $cwd,
+        $title,
+        $tokensUsed,
+        $firstUserMessage,
+        $model,
+        $reasoningEffort,
+        $createdAtMs,
+        $updatedAtMs,
         0
       );
     `);
+    for (const thread of threads) {
+      insert.run({
+        $id: thread.id,
+        $rolloutPath: thread.rollout_path,
+        $createdAt: thread.created_at,
+        $updatedAt: thread.updated_at,
+        $source: thread.source,
+        $modelProvider: thread.model_provider,
+        $cwd: thread.cwd,
+        $title: thread.title,
+        $tokensUsed: thread.tokens_used,
+        $firstUserMessage: thread.first_user_message,
+        $model: thread.model,
+        $reasoningEffort: thread.reasoning_effort,
+        $createdAtMs: thread.created_at_ms,
+        $updatedAtMs: thread.updated_at_ms,
+      });
+    }
   } finally {
     database.close();
   }
-}
-
-function sqlString(value: string) {
-  return value.replaceAll("'", "''");
 }
 
 function createTempWorkspace() {
