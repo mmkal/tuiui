@@ -106,6 +106,7 @@ test("does not poll home idle notification snapshots before opt in", async ({ pa
 });
 
 test("does not refresh busy session idle status before opt in", async ({ page, ctx }) => {
+  await useLegacyApi(page);
   const sessionId = "tuiui_idle_polling";
   let sessionRequests = 0;
   await page.route(`**/api/sessions/${sessionId}`, async (route) => {
@@ -1161,6 +1162,7 @@ test("resolves a fakeagent-backed Codex TUI into SDK summary YAML", async ({ pag
 });
 
 test("shows a toast instead of an unhandled rejection when session brief fetch fails", async ({ page, ctx }) => {
+  await useLegacyApi(page);
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => {
     pageErrors.push(error.message);

@@ -2250,7 +2250,7 @@ textarea {
   }
 
   .toast-viewport {
-    top: calc(max(8px, env(safe-area-inset-top)) + 40px);
+    top: calc(max(8px, env(safe-area-inset-top)) + 68px);
     right: 10px;
     bottom: auto;
     left: 10px;
