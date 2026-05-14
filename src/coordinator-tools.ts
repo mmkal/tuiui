@@ -99,14 +99,22 @@ export type BuildCoordinatorAgentsOptions = {
   resolveGitMetadata: (cwd: string) => CoordinatorGitMetadata;
 };
 
+const gitMetadataCache = new Map<string, { expiresAtMs: number; metadata: CoordinatorGitMetadata }>();
+const gitMetadataCacheMs = 30_000;
+
 export function buildCoordinatorAgents(
   sources: CoordinatorAgentSource[],
   options: BuildCoordinatorAgentsOptions = { resolveGitMetadata },
 ): CoordinatorAgent[] {
+  const gitByCwd = new Map<string, CoordinatorGitMetadata>();
   return sources
     .filter((source) => Boolean(source.id))
     .map((source) => {
-      const git = options.resolveGitMetadata(source.cwd);
+      let git = gitByCwd.get(source.cwd);
+      if (!git) {
+        git = options.resolveGitMetadata(source.cwd);
+        gitByCwd.set(source.cwd, git);
+      }
       return {
         id: source.id,
         source: source.source,
@@ -248,13 +256,21 @@ export function resolveGitMetadata(cwd: string): CoordinatorGitMetadata {
   if (!gitRoot) {
     return emptyGitMetadata();
   }
+  const branch = gitOutput(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const cacheKey = `${gitRoot}\0${branch}`;
+  const cached = gitMetadataCache.get(cacheKey);
+  if (cached && cached.expiresAtMs > Date.now()) {
+    return cached.metadata;
+  }
 
-  return {
+  const metadata = {
     gitRoot,
-    branch: gitOutput(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]),
+    branch,
     dirtyFiles: gitDirtyFiles(cwd),
     prNumber: currentPullRequestNumber(cwd),
   };
+  gitMetadataCache.set(cacheKey, { expiresAtMs: Date.now() + gitMetadataCacheMs, metadata });
+  return metadata;
 }
 
 export function emptyGitMetadata(): CoordinatorGitMetadata {
@@ -266,10 +282,27 @@ export function emptyGitMetadata(): CoordinatorGitMetadata {
   };
 }
 
+export function findExplicitPromptAgentTargets(
+  agents: Array<Pick<CoordinatorAgent, "id" | "title" | "promptable">>,
+  prompt: string,
+) {
+  if (!/\b(?:tell|ask|prompt|message|send)\b/i.test(prompt)) {
+    return [];
+  }
+  const normalizedPrompt = normalizeAgentReference(prompt);
+  return uniqueStrings(agents
+    .filter((agent) => agent.promptable)
+    .filter((agent) => {
+      return agentReferenceMatches(normalizedPrompt, agent.id) ||
+        agentReferenceMatches(normalizedPrompt, agent.title);
+    })
+    .map((agent) => agent.id));
+}
+
 function findDirtyFileClashes(agents: CoordinatorAgent[]): CoordinatorClash[] {
   const groups = new Map<string, { gitRoot: string; file: string; agents: CoordinatorAgent[] }>();
   for (const agent of agents) {
-    if (!agent.gitRoot) {
+    if (!agent.gitRoot || agent.lifecycle === "exited") {
       continue;
     }
     for (const file of agent.dirtyFiles) {
@@ -356,7 +389,11 @@ function summarizeClashAgents(agents: CoordinatorAgent[]) {
 }
 
 function uniqueAgentIds(agents: CoordinatorAgent[]) {
-  return [...new Set(agents.map((agent) => agent.id))];
+  return uniqueStrings(agents.map((agent) => agent.id));
+}
+
+function uniqueStrings(values: string[]) {
+  return [...new Set(values)];
 }
 
 function currentStructuredBrief(sdk: SessionSdkPayload) {
@@ -419,9 +456,21 @@ function dirtyPathFromPorcelainLine(line: string) {
 }
 
 function currentPullRequestNumber(cwd: string) {
-  const raw = commandOutput("gh", ["pr", "view", "--json", "number", "--jq", ".number"], cwd, 1_200);
+  const raw = commandOutput("gh", ["pr", "view", "--json", "number", "--jq", ".number"], cwd, 250);
   const number = Number(raw);
   return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function normalizeAgentReference(value: string) {
+  return ` ${value.toLowerCase().replace(/[^a-z0-9_]+/g, " ")} `;
+}
+
+function agentReferenceMatches(normalizedPrompt: string, value: string) {
+  const normalizedValue = normalizeAgentReference(value).trim();
+  if (normalizedValue.length < 3) {
+    return false;
+  }
+  return normalizedPrompt.includes(` ${normalizedValue} `);
 }
 
 function gitOutput(cwd: string, args: string[]) {

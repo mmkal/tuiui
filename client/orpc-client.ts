@@ -7,7 +7,7 @@ const rpcLink = new RPCLink({
   url: `${location.origin}/rpc`,
 });
 
-const orpc: RouterClient<AppRouter> = createORPCClient(rpcLink);
+export const orpcClient: RouterClient<AppRouter> = createORPCClient(rpcLink);
 
 type OrpcJsonResult<T> =
   | { handled: true; value: T }
@@ -22,31 +22,25 @@ export async function callOrpcJsonApi<T>(path: string, init: RequestInit = {}): 
   const url = new URL(path, location.origin);
 
   if (method === "GET" && url.pathname === "/api/config") {
-    return handled(await orpc.config() as T);
+    return handled(await orpcClient.config() as T);
   }
   if (method === "GET" && url.pathname === "/api/cwd") {
-    return handled(await orpc.cwd() as T);
+    return handled(await orpcClient.cwd() as T);
   }
   if (method === "GET" && url.pathname === "/api/commands") {
-    return handled(await orpc.commands() as T);
+    return handled(await orpcClient.commands() as T);
   }
   if (method === "GET" && url.pathname === "/api/agent-sessions/recent") {
-    return handled(await orpc.agentSessions.recent() as T);
-  }
-  if (method === "GET" && url.pathname === "/api/coordinator") {
-    return handled(await orpc.coordinator.get() as T);
-  }
-  if (method === "POST" && url.pathname === "/api/coordinator/send") {
-    return handled(await orpc.coordinator.send(jsonBody(init)) as T);
+    return handled(await orpcClient.agentSessions.recent() as T);
   }
   if (method === "GET" && url.pathname === "/api/codex-sessions/recent") {
-    return handled(await orpc.codexSessions.recent() as T);
+    return handled(await orpcClient.codexSessions.recent() as T);
   }
   if (method === "GET" && url.pathname === "/api/sessions") {
-    return handled(await orpc.sessions.list() as T);
+    return handled(await orpcClient.sessions.list() as T);
   }
   if (method === "POST" && url.pathname === "/api/sessions") {
-    return handled(await orpc.sessions.create(jsonBody(init)) as T);
+    return handled(await orpcClient.sessions.create(jsonBody(init)) as T);
   }
 
   const match = url.pathname.match(/^\/api\/sessions\/([^/]+)(?:\/([^/]+))?$/);
@@ -57,34 +51,34 @@ export async function callOrpcJsonApi<T>(path: string, init: RequestInit = {}): 
   const sessionId = match[1] || "";
   const action = match[2] || "";
   if (method === "GET" && !action) {
-    return handled(await orpc.sessions.get({ sessionId }) as T);
+    return handled(await orpcClient.sessions.get({ sessionId }) as T);
   }
   if (method === "GET" && action === "recovery") {
-    return handled(await orpc.sessions.recovery({ sessionId }) as T);
+    return handled(await orpcClient.sessions.recovery({ sessionId }) as T);
   }
   if (method === "POST" && action === "recover") {
-    return handled(await orpc.sessions.recover({ sessionId }) as T);
+    return handled(await orpcClient.sessions.recover({ sessionId }) as T);
   }
   if (method === "POST" && action === "archive") {
-    return handled(await orpc.sessions.archive({ sessionId }) as T);
+    return handled(await orpcClient.sessions.archive({ sessionId }) as T);
   }
   if (method === "POST" && action === "send") {
-    return handled(await orpc.sessions.send({ sessionId, ...jsonBody(init) }) as T);
+    return handled(await orpcClient.sessions.send({ sessionId, ...jsonBody(init) }) as T);
   }
   if (method === "POST" && action === "key") {
-    return handled(await orpc.sessions.key({ sessionId, ...jsonBody(init) }) as T);
+    return handled(await orpcClient.sessions.key({ sessionId, ...jsonBody(init) }) as T);
   }
   if (method === "POST" && action === "resize") {
-    return handled(await orpc.sessions.resize({ sessionId, ...jsonBody(init) }) as T);
+    return handled(await orpcClient.sessions.resize({ sessionId, ...jsonBody(init) }) as T);
   }
   if (method === "POST" && action === "kill") {
-    return handled(await orpc.sessions.kill({ sessionId }) as T);
+    return handled(await orpcClient.sessions.kill({ sessionId }) as T);
   }
   if (method === "POST" && action === "sdk-refresh") {
-    return handled(await orpc.sessions.sdkRefresh({ sessionId }) as T);
+    return handled(await orpcClient.sessions.sdkRefresh({ sessionId }) as T);
   }
   if (method === "POST" && action === "sdk-summarize") {
-    return handled(await orpc.sessions.sdkSummarize({ sessionId }) as T);
+    return handled(await orpcClient.sessions.sdkSummarize({ sessionId }) as T);
   }
 
   return { handled: false };

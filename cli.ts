@@ -76,6 +76,7 @@ import {
   buildCoordinatorAgents,
   buildCoordinatorBriefing,
   findCoordinatorClashes,
+  findExplicitPromptAgentTargets,
   managedCoordinatorAgentSource,
   recentCodexCoordinatorAgentSource,
   type CoordinatorAgent,
@@ -217,6 +218,7 @@ type CoordinatorState = {
   audit: CoordinatorAuditEntry[];
   subscriptions: Map<string, CoordinatorSubscription>;
   lastAgentStatuses: Map<string, SessionStatus>;
+  activePromptAgentAuthorizations: Set<string>;
   runQueue: Promise<void>;
 };
 
@@ -417,14 +419,6 @@ async function handleApiRequest(state: ServerState, request: Request, url: URL):
     return Response.json(await readRecentAgentSessions());
   }
 
-  if (request.method === "GET" && url.pathname === "/api/coordinator") {
-    return Response.json(coordinatorPayload(state));
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/coordinator/send") {
-    return Response.json(await sendCoordinatorPayload(state, await request.json() as CoordinatorSendInput));
-  }
-
   if (request.method === "GET" && url.pathname === "/api/codex-sessions/recent") {
     return Response.json(readRecentCodexSessions());
   }
@@ -558,6 +552,7 @@ function createCoordinatorState(): CoordinatorState {
     audit: [],
     subscriptions: new Map(),
     lastAgentStatuses: new Map(),
+    activePromptAgentAuthorizations: new Set(),
     runQueue: Promise.resolve(),
   };
 }
@@ -581,8 +576,9 @@ async function sendCoordinatorPayload(state: ServerState, input: CoordinatorSend
   if (!prompt) {
     throw new ORPCError("BAD_REQUEST", { message: "prompt is required" });
   }
+  const agents = listCoordinatorAgents(state);
   addCoordinatorMessage(state, "user", prompt);
-  await queueCoordinatorPrompt(state, prompt);
+  await queueCoordinatorPrompt(state, prompt, findExplicitPromptAgentTargets(agents, prompt));
   return coordinatorPayload(state);
 }
 
@@ -642,10 +638,14 @@ async function coordinatorPromptAgent(state: ServerState, agentId: string, promp
   if (!session || session.archivedAtMs || session.lifecycle !== "running") {
     throw new Error(`Agent is not a live managed session: ${agentId}`);
   }
+  if (!state.coordinator.activePromptAgentAuthorizations.has(agentId)) {
+    throw new Error(`promptAgent is not authorized for ${agentId} in this coordinator turn`);
+  }
   const text = String(prompt || "").trim();
   if (!text) {
     throw new Error("prompt is required");
   }
+  state.coordinator.activePromptAgentAuthorizations.delete(agentId);
   await sendToSession(state, session, text, true);
   const createdAt = new Date().toISOString();
   addCoordinatorAudit(state, "prompt-agent", agentId, text, createdAt);
@@ -659,16 +659,18 @@ async function coordinatorPromptAgent(state: ServerState, agentId: string, promp
 }
 
 function coordinatorSubscribeAgent(state: ServerState, agentId: string) {
-  if (!coordinatorSourceById(state, agentId)) {
+  const source = coordinatorSourceById(state, agentId);
+  if (!source) {
     throw new Error(`Unknown agent: ${agentId}`);
+  }
+  const session = state.sessions.get(agentId);
+  if (!session || session.archivedAtMs || session.lifecycle !== "running") {
+    throw new Error(`Agent is not a running managed session and cannot emit idle events: ${agentId}`);
   }
   const createdAt = new Date().toISOString();
   state.coordinator.subscriptions.set(agentId, { agentId, createdAt });
-  const session = state.sessions.get(agentId);
-  if (session) {
-    state.coordinator.lastAgentStatuses.set(agentId, runtimeSessionStatus(session));
-    scheduleCoordinatorIdleCheck(state, session);
-  }
+  state.coordinator.lastAgentStatuses.set(agentId, runtimeSessionStatus(session));
+  scheduleCoordinatorIdleCheck(state, session);
   addCoordinatorAudit(state, "subscribe", agentId, "Subscribed to idle transition.", createdAt);
   return {
     ok: true,
@@ -723,26 +725,27 @@ function addCoordinatorAudit(
   });
 }
 
-async function queueCoordinatorPrompt(state: ServerState, prompt: string) {
+async function queueCoordinatorPrompt(state: ServerState, prompt: string, authorizedPromptAgentIds: string[]) {
   state.coordinator.runQueue = state.coordinator.runQueue
-    .then(async () => await runCoordinatorTurn(state, prompt))
-    .catch(async () => await runCoordinatorTurn(state, prompt));
+    .then(async () => await runCoordinatorTurn(state, prompt, authorizedPromptAgentIds))
+    .catch(async () => await runCoordinatorTurn(state, prompt, authorizedPromptAgentIds));
   await state.coordinator.runQueue;
 }
 
 async function queueCoordinatorEventPrompt(state: ServerState, prompt: string) {
   state.coordinator.runQueue = state.coordinator.runQueue
-    .then(async () => await runCoordinatorTurn(state, prompt))
-    .catch(async () => await runCoordinatorTurn(state, prompt));
+    .then(async () => await runCoordinatorTurn(state, prompt, []))
+    .catch(async () => await runCoordinatorTurn(state, prompt, []));
 }
 
-async function runCoordinatorTurn(state: ServerState, prompt: string) {
+async function runCoordinatorTurn(state: ServerState, prompt: string, authorizedPromptAgentIds: string[]) {
   state.coordinator.status = "running";
   state.coordinator.error = "";
+  state.coordinator.activePromptAgentAuthorizations = new Set(authorizedPromptAgentIds);
   try {
     const response = process.env.TUIUI_COORDINATOR_FAKE === "1"
       ? fakeCoordinatorResponse(state, prompt)
-      : await runCodexCoordinatorTurn(state, prompt);
+      : await runCodexCoordinatorTurn(state, prompt, authorizedPromptAgentIds);
     addCoordinatorMessage(state, "assistant", response);
     state.coordinator.status = "idle";
   } catch (error) {
@@ -750,12 +753,14 @@ async function runCoordinatorTurn(state: ServerState, prompt: string) {
     state.coordinator.error = message;
     state.coordinator.status = "error";
     addCoordinatorMessage(state, "error", message);
+  } finally {
+    state.coordinator.activePromptAgentAuthorizations.clear();
   }
 }
 
-async function runCodexCoordinatorTurn(state: ServerState, prompt: string) {
+async function runCodexCoordinatorTurn(state: ServerState, prompt: string, authorizedPromptAgentIds: string[]) {
   const thread = coordinatorThread(state);
-  const result = await thread.run(createCoordinatorPrompt(prompt));
+  const result = await thread.run(createCoordinatorPrompt(prompt, authorizedPromptAgentIds));
   state.coordinator.threadId = thread.id || state.coordinator.threadId;
   return result.finalResponse || "Coordinator finished without a final response.";
 }
@@ -793,11 +798,15 @@ function coordinatorThreadOptions() {
   };
 }
 
-function createCoordinatorPrompt(prompt: string) {
+function createCoordinatorPrompt(prompt: string, authorizedPromptAgentIds: string[]) {
+  const promptAgentAuthority = authorizedPromptAgentIds.length
+    ? `This turn may call promptAgent only for these agent ids: ${authorizedPromptAgentIds.join(", ")}.`
+    : "This turn has no human promptAgent authorization. Any promptAgent call will be rejected by the server.";
   return [
     "You are TUI UI's coordinator agent. Use the TUI UI MCP tools to inspect managed agents, brief the user, and find exact work clashes.",
     "Call listAgents and findClashes before answering broad status questions. Call getBriefing for agents that need more detail.",
     "Only call promptAgent when the human explicitly asks you to tell an agent something. Never kill, archive, merge, push, or rewrite history.",
+    promptAgentAuthority,
     "When an idle event is injected, update your situational awareness and summarize what changed. Do not automatically prompt worker agents because of an idle event.",
     "User or system prompt:",
     prompt,

@@ -106,15 +106,14 @@ test("does not poll home idle notification snapshots before opt in", async ({ pa
 });
 
 test("does not refresh busy session idle status before opt in", async ({ page, ctx }) => {
-  await useLegacyApi(page);
   const sessionId = "tuiui_idle_polling";
   let sessionRequests = 0;
-  await page.route(`**/api/sessions/${sessionId}`, async (route) => {
+  await page.route("**/rpc/sessions/get", async (route) => {
     sessionRequests += 1;
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify(fakeSessionPayload({ id: sessionId, status: "busy" })),
+      body: orpcJsonBody(fakeSessionPayload({ id: sessionId, status: "busy" })),
     });
   });
   await page.route(`**/api/sessions/${sessionId}/events`, async (route) => {
@@ -1162,7 +1161,6 @@ test("resolves a fakeagent-backed Codex TUI into SDK summary YAML", async ({ pag
 });
 
 test("shows a toast instead of an unhandled rejection when session brief fetch fails", async ({ page, ctx }) => {
-  await useLegacyApi(page);
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => {
     pageErrors.push(error.message);
@@ -1173,15 +1171,12 @@ test("shows a toast instead of an unhandled rejection when session brief fetch f
   await page.getByRole("button", { name: "codex", exact: true }).click();
   await expectReadyFakeCodex(page);
   await clickSessionMenuButton(page, "Debug");
-  await page.evaluate(() => {
-    const realFetch = window.fetch.bind(window);
-    (window as any).fetch = (input: any, init: any) => {
-      const url = typeof input === "string" ? input : input instanceof Request ? input.url : String(input);
-      if (url.includes("/sdk-summarize")) {
-        return Promise.reject(new TypeError("Failed to fetch"));
-      }
-      return realFetch(input, init);
-    };
+  await page.route("**/rpc/**", async (route) => {
+    if (route.request().url().includes("/sessions/sdkSummarize")) {
+      await route.abort("failed");
+      return;
+    }
+    await route.continue();
   });
 
   await page.getByRole("button", { name: "Get session brief" }).click();
@@ -1280,6 +1275,10 @@ function fakeSessionPayload(input: { id: string; status: "busy" | "idle" }) {
     stdinEvents: [],
     stdoutEvents: [],
   };
+}
+
+function orpcJsonBody(value: unknown) {
+  return JSON.stringify({ json: value });
 }
 
 async function fetchTuishot(page: Page) {

@@ -4,6 +4,7 @@ import {
   buildCoordinatorBriefing,
   emptyGitMetadata,
   findCoordinatorClashes,
+  findExplicitPromptAgentTargets,
   type CoordinatorAgentSource,
   type CoordinatorGitMetadata,
 } from "../src/coordinator-tools.ts";
@@ -73,6 +74,34 @@ test("finds deterministic dirty-file, branch, and PR clashes", () => {
   ]);
 });
 
+test("does not report dirty-file clashes for exited sessions", () => {
+  const agents = buildCoordinatorAgents([
+    source({ id: "session-a", cwd: "/repo-a", title: "Running Codex" }),
+    source({ id: "session-b", cwd: "/repo-b", title: "Exited Codex", status: "exited", lifecycle: "exited" }),
+  ], {
+    resolveGitMetadata(cwd) {
+      return gitByCwd[cwd] || emptyGitMetadata();
+    },
+  });
+
+  expect(findCoordinatorClashes(agents)).toEqual([]);
+});
+
+test("finds explicit promptAgent targets only from human-directed prompts", () => {
+  const agents = buildCoordinatorAgents([
+    source({ id: "tuiui_alpha", cwd: "/repo-a", title: "Docs Agent" }),
+    source({ id: "tuiui_beta", cwd: "/repo-b", title: "Review Agent" }),
+  ], {
+    resolveGitMetadata() {
+      return emptyGitMetadata();
+    },
+  });
+
+  expect(findExplicitPromptAgentTargets(agents, "what are the clashes?")).toEqual([]);
+  expect(findExplicitPromptAgentTargets(agents, "tell Docs Agent to check the MCP docs")).toEqual(["tuiui_alpha"]);
+  expect(findExplicitPromptAgentTargets(agents, "ask tuiui_beta to review the coordinator gate")).toEqual(["tuiui_beta"]);
+});
+
 test("briefing prefers a current structured session brief", () => {
   const agent = buildCoordinatorAgents([sourceWithBrief()], {
     resolveGitMetadata() {
@@ -118,6 +147,7 @@ function source(input: {
   cwd: string;
   title: string;
   status?: "busy" | "idle" | "exited";
+  lifecycle?: "running" | "exited" | "external";
 }): CoordinatorAgentSource {
   return {
     id: input.id,
@@ -128,7 +158,7 @@ function source(input: {
     args: [],
     cwd: input.cwd,
     status: input.status || "busy",
-    lifecycle: "running",
+    lifecycle: input.lifecycle || "running",
     updatedAt: "2026-05-14T07:00:00.000Z",
     lastOutputAt: "2026-05-14T07:00:00.000Z",
     routePath: `/sessions/${input.id}`,

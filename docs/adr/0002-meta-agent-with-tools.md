@@ -26,7 +26,9 @@ TUI UI will implement coordination as deterministic TypeScript functions first:
 
 TUI UI will expose those functions to the coordinator through MCP, using either a same-server streamable HTTP MCP endpoint or a stdio MCP command if the HTTP path proves awkward in the local SDK/CLI flow.
 
-The browser will expose a coordinator chat route and Home entry point. The coordinator will not be listed as a normal managed session because it supervises managed sessions rather than running inside one.
+The browser will expose a coordinator chat route and Home entry point through the existing ORPC client surface. This slice will not add coordinator-specific legacy JSON endpoints. The coordinator will not be listed as a normal managed session because it supervises managed sessions rather than running inside one.
+
+`promptAgent` remains a tool, but tool availability is not enough authority to write into another agent. TUI UI will add a deterministic per-turn gate: the server permits `promptAgent` only while handling a human coordinator prompt that explicitly names a promptable agent with a forwarding verb such as "tell", "ask", "prompt", "message", or "send". Broad status questions and injected idle-event turns have no prompt-forwarding authority.
 
 ## Consequences
 
@@ -36,4 +38,6 @@ The Codex coordinator can use natural language to explain the deterministic stat
 
 The first implementation needs explicit coordinator server state: thread id, message/audit history, a serialized run queue, subscriptions, and idle-event injection.
 
-`promptAgent` is intentionally narrow. It forwards a user-visible prompt through existing managed-session input paths. It does not grant the coordinator general shell, kill, archive, merge, or PR authority.
+`promptAgent` is intentionally narrow. It forwards a user-visible prompt through existing managed-session input paths only during a server-authorized human turn. It does not grant the coordinator general shell, kill, archive, merge, or PR authority.
+
+Subscriptions are also limited to live managed sessions. External recent Codex sessions and exited sessions can be inspected, but they cannot promise a TUI UI idle callback.

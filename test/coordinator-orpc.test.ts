@@ -12,7 +12,7 @@ import type { RouterClient } from "@orpc/server";
 import { expect, test } from "bun:test";
 import type { AppRouter } from "../cli.ts";
 
-test("coordinator API lists agents, answers with fake Codex, and injects subscribed idle events", async () => {
+test("coordinator ORPC lists agents, answers with fake Codex, and injects subscribed idle events", async () => {
   using workspace = createWorkspace();
   await using server = await startTuiuiServer(workspace.path);
   const client: RouterClient<AppRouter> = createORPCClient(new RPCLink({ url: `${server.url}/rpc` }));
@@ -79,7 +79,7 @@ test("coordinator API lists agents, answers with fake Codex, and injects subscri
 });
 
 function createWorkspace() {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "tuiui-coordinator-api-"));
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "tuiui-coordinator-orpc-"));
   const binDir = path.join(workspace, "bin");
   fs.mkdirSync(binDir, { recursive: true });
   fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
@@ -149,7 +149,7 @@ async function startTuiuiServer(workspace: string) {
 }
 
 async function createMcpClient(serverUrl: string) {
-  const client = new Client({ name: "tuiui-coordinator-api-test", version: "1.0.0" });
+  const client = new Client({ name: "tuiui-coordinator-orpc-test", version: "1.0.0" });
   const transport = new StreamableHTTPClientTransport(new URL(`${serverUrl}/mcp/coordinator`));
   await client.connect(transport);
   return {

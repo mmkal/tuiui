@@ -16,7 +16,7 @@ import {
 import { parseCommandLine } from "../src/command-line.ts";
 import { stringify as stringifyYaml } from "yaml";
 import { attachmentUploadName, dedupeClipboardImageFiles, type AttachmentSource } from "./attachments.ts";
-import { callOrpcJsonApi } from "./orpc-client.ts";
+import { callOrpcJsonApi, orpcClient } from "./orpc-client.ts";
 import {
   BrowserIdleNotifications,
   type IdleNotificationNativeApi,
@@ -782,7 +782,7 @@ async function fetchSessionRecovery(sessionId: string) {
 }
 
 async function renderCoordinator() {
-  const payload = await api<CoordinatorPayload>("/api/coordinator");
+  const payload = await orpcClient.coordinator.get();
   app.innerHTML = `
     <main class="layout home-layout coordinator-layout">
       <header class="topbar">
@@ -830,10 +830,7 @@ function bindCoordinatorForm() {
       submit.textContent = "Sending";
     }
     try {
-      const payload = await api<CoordinatorPayload>("/api/coordinator/send", {
-        method: "POST",
-        body: JSON.stringify({ prompt: text }),
-      });
+      const payload = await orpcClient.coordinator.send({ prompt: text });
       prompt.value = "";
       renderCoordinatorPayload(payload);
     } finally {
@@ -852,7 +849,7 @@ function startCoordinatorPolling() {
       stopCoordinatorPolling();
       return;
     }
-    void api<CoordinatorPayload>("/api/coordinator")
+    void orpcClient.coordinator.get()
       .then(renderCoordinatorPayload)
       .catch(() => undefined);
   }, 5_000);
@@ -974,7 +971,7 @@ async function renderHome() {
     api<SessionListItem[]>("/api/sessions"),
     api<CommandPreset[]>("/api/commands"),
     api<RecentAgentSession[]>("/api/agent-sessions/recent"),
-    api<CoordinatorPayload>("/api/coordinator"),
+    orpcClient.coordinator.get(),
   ]);
   const displayHomeDirs = homeDirsForDisplay(cwd);
   homeIdleNotificationDisplayDirs = displayHomeDirs;
