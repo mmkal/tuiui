@@ -24,6 +24,7 @@
         "codemirror": "^6.0.2",
         "fakeagent": "file:../fakeagent",
         "sqlfu": "0.0.3-14",
+        "trpc-cli": "^0.14.1",
         "yaml": "^2.8.4",
         "zod": "^4.4.3",
       },
