@@ -12,11 +12,21 @@ import type { RouterClient } from "@orpc/server";
 import { expect, test } from "bun:test";
 import type { AppRouter } from "../cli.ts";
 
-test("coordinator ORPC lists agents, answers with fake Codex, and injects subscribed idle events", async () => {
+const mcpToken = "test-coordinator-token";
+
+test("coordinator tools are attached to a normal managed session", async () => {
   using workspace = createWorkspace();
   await using server = await startTuiuiServer(workspace.path);
   const client: RouterClient<AppRouter> = createORPCClient(new RPCLink({ url: `${server.url}/rpc` }));
 
+  const coordinator = await client.sessions.create({
+    coordinator: true,
+    cwd: workspace.path,
+    cols: 80,
+    rows: 24,
+    env: {},
+    fakeAgent: "codex",
+  });
   const first = await client.sessions.create({
     command: "coord-agent",
     args: [],
@@ -38,25 +48,56 @@ test("coordinator ORPC lists agents, answers with fake Codex, and injects subscr
     return payload.renderedText;
   }, (text) => text.includes("coord ready"));
 
-  const initial = await client.coordinator.get();
-  expect(initial).toMatchObject({
-    agents: expect.arrayContaining([
-      expect.objectContaining({ id: first.id, branch: "bedtime/meta-agent", dirtyFiles: ["src/shared.ts"] }),
-      expect.objectContaining({ id: second.id, branch: "bedtime/meta-agent", dirtyFiles: ["src/shared.ts"] }),
-    ]),
-    clashes: expect.arrayContaining([
-      expect.objectContaining({ kind: "dirty-file", file: "src/shared.ts" }),
-      expect.objectContaining({ kind: "same-branch", branch: "bedtime/meta-agent" }),
-    ]),
-  });
-
-  const answered = await client.coordinator.send({ prompt: "where are the clashes?" });
-  expect(answered.messages.at(-1)).toMatchObject({
-    role: "assistant",
-    text: expect.stringContaining("Found"),
-  });
+  const unauthorized = await fetch(`${server.url}/mcp/coordinator`, { method: "POST" });
+  expect(unauthorized).toMatchObject({ status: 401 });
 
   await using mcp = await createMcpClient(server.url);
+  await expect(await mcp.client.callTool({ name: "listAgents", arguments: {} })).toMatchObject({
+    structuredContent: {
+      result: expect.arrayContaining([
+        expect.objectContaining({ id: first.id, branch: "bedtime/meta-agent", dirtyFiles: ["src/shared.ts"] }),
+        expect.objectContaining({ id: second.id, branch: "bedtime/meta-agent", dirtyFiles: ["src/shared.ts"] }),
+      ]),
+    },
+  });
+  const listed = await mcp.client.callTool({ name: "listAgents", arguments: {} }) as any;
+  expect(listed.structuredContent.result.some((agent: any) => agent.id === coordinator.id)).toBe(false);
+
+  await expect(await mcp.client.callTool({ name: "findClashes", arguments: {} })).toMatchObject({
+    structuredContent: {
+      result: expect.arrayContaining([
+        expect.objectContaining({ kind: "dirty-file", file: "src/shared.ts" }),
+        expect.objectContaining({ kind: "same-branch", branch: "bedtime/meta-agent" }),
+      ]),
+    },
+  });
+
+  await expect(await mcp.client.callTool({
+    name: "promptAgent",
+    arguments: { agentId: second.id, prompt: "review the auth gate" },
+  })).toMatchObject({
+    isError: true,
+    content: [expect.objectContaining({ text: expect.stringContaining("not authorized") })],
+  });
+
+  await client.sessions.send({
+    sessionId: coordinator.id,
+    text: `tell ${second.id} to review the auth gate`,
+    submit: true,
+  });
+  await expect(await mcp.client.callTool({
+    name: "promptAgent",
+    arguments: { agentId: second.id, prompt: "review the auth gate" },
+  })).toMatchObject({
+    structuredContent: {
+      result: { ok: true, agentId: second.id, prompt: "review the auth gate" },
+    },
+  });
+  await poll(async () => {
+    const payload = await client.sessions.get({ sessionId: second.id });
+    return payload.stdinEvents.map((event) => event.text).join("\n");
+  }, (text) => text.includes("review the auth gate"));
+
   await expect(await mcp.client.callTool({
     name: "subscribe",
     arguments: { agentId: first.id },
@@ -67,24 +108,27 @@ test("coordinator ORPC lists agents, answers with fake Codex, and injects subscr
   });
 
   await client.sessions.send({ sessionId: first.id, text: "work", submit: true });
-  const afterIdle = await poll(async () => await client.coordinator.get(), (payload) => {
-    return payload.messages.some((message) => message.role === "event" && message.text.includes("went idle")) &&
-      payload.messages.some((message) => message.role === "assistant" && message.text.includes("Noted idle event"));
+  const coordinatorPayload = await poll(async () => {
+    return await client.sessions.get({ sessionId: coordinator.id });
+  }, (payload) => {
+    return payload.stdinEvents.some((event) =>
+      event.text.includes("[tuiui coordinator event]") &&
+      event.text.includes(first.id) &&
+      event.text.includes("went idle")
+    );
   });
-  expect(afterIdle).toMatchObject({
-    audit: expect.arrayContaining([
-      expect.objectContaining({ kind: "idle-event", agentId: first.id }),
-    ]),
+  expect(coordinatorPayload.stdinEvents.at(-1)).toMatchObject({
+    text: expect.stringContaining("[tuiui coordinator event]"),
   });
 });
 
 function createWorkspace() {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "tuiui-coordinator-orpc-"));
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "tuiui-coordinator-runtime-"));
   const binDir = path.join(workspace, "bin");
   fs.mkdirSync(binDir, { recursive: true });
   fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
   fs.writeFileSync(path.join(binDir, "coord-agent"), coordinatorAgentSource(), { mode: 0o755 });
-  fs.writeFileSync(path.join(workspace, "README.md"), "coordinator api test\n");
+  fs.writeFileSync(path.join(workspace, "README.md"), "coordinator runtime test\n");
   fs.writeFileSync(path.join(workspace, ".gitignore"), "bin/\nhome/\nstate/\n");
   git(workspace, ["init", "-b", "bedtime/meta-agent"]);
   git(workspace, ["config", "user.email", "tuiui-test@local.invalid"]);
@@ -110,7 +154,7 @@ async function startTuiuiServer(workspace: string) {
       PATH: [path.join(workspace, "bin"), process.env.PATH || ""].join(path.delimiter),
       HOME: path.join(workspace, "home"),
       TUIUI_STATE_DB: path.join(workspace, "state", "tuiui.sqlite"),
-      TUIUI_COORDINATOR_FAKE: "1",
+      TUIUI_COORDINATOR_MCP_TOKEN: mcpToken,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -149,8 +193,12 @@ async function startTuiuiServer(workspace: string) {
 }
 
 async function createMcpClient(serverUrl: string) {
-  const client = new Client({ name: "tuiui-coordinator-orpc-test", version: "1.0.0" });
-  const transport = new StreamableHTTPClientTransport(new URL(`${serverUrl}/mcp/coordinator`));
+  const client = new Client({ name: "tuiui-coordinator-runtime-test", version: "1.0.0" });
+  const transport = new StreamableHTTPClientTransport(new URL(`${serverUrl}/mcp/coordinator`), {
+    requestInit: {
+      headers: { Authorization: `Bearer ${mcpToken}` },
+    },
+  });
   await client.connect(transport);
   return {
     client,

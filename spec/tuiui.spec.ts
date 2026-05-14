@@ -225,28 +225,22 @@ test("launches fake Codex, translates the TUI into semantic sections, and accept
   await expect(page.getByTestId("stdout-log")).toContainText("three");
 });
 
-test("shows the coordinator chat with managed agents and fake Codex replies", async ({ page }) => {
-  await using ctx = await createContext({ TUIUI_COORDINATOR_FAKE: "1" });
-
+test("launches the coordinator as a normal TUI session with MCP tools", async ({ page, ctx }) => {
   await page.goto(ctx.baseUrl);
-  await page.getByRole("textbox", { name: "Command" }).fill("bytewise-ui");
-  await page.getByRole("textbox", { name: "Command" }).press("Enter");
-  await expect(page.getByTestId("rendered-terminal")).toContainText("──hello──");
-  const sessionId = (await fetchSessionPayload(page)).id;
+  await page.getByRole("checkbox", { name: "fakeagent" }).check();
+  await page.getByRole("group", { name: "Shortcuts" }).getByRole("button", { name: "coordinator", exact: true }).click();
 
-  await page.goto(`${ctx.baseUrl}/coordinator`);
-
-  await expect(page.getByTestId("coordinator-status")).toHaveText(/idle · 1 agent · 0 clashes/);
-  await expect(page.getByTestId("coordinator-agents")).toContainText("bytewise-ui");
-  await expect(page.getByTestId("coordinator-agents").getByRole("link", { name: "bytewise-ui" })).toHaveAttribute("href", `/sessions/${sessionId}`);
-  await expect(page.getByTestId("coordinator-clashes")).toContainText("No deterministic clashes");
-
-  await page.getByRole("textbox", { name: "Message coordinator" }).fill("what's everybody working on?");
-  await page.getByTestId("send-coordinator").click();
-
-  await expect(page.getByTestId("coordinator-status")).toHaveText(/idle · 1 agent · 0 clashes/);
-  await expect(page.getByTestId("coordinator-messages")).toContainText("what's everybody working on?");
-  await expect(page.getByTestId("coordinator-messages")).toContainText("I can see 1 agent and 0 deterministic clashes.");
+  await expect(page).toHaveURL(/\/sessions\/tuiui_[a-f0-9]+$/);
+  await expect(page.getByTestId("rendered-terminal")).toContainText("OpenAI Codex");
+  const payload = await fetchSessionPayload(page);
+  expect(payload).toMatchObject({
+    command: expect.stringContaining("fakeagent"),
+    title: expect.stringContaining("codex"),
+  });
+  expect(payload.args.join(" ")).toContain("/mcp/coordinator");
+  expect(payload.args.join(" ")).toContain("enabled_tools");
+  expect(payload.args.join(" ")).toContain("listAgents");
+  expect(payload.args.at(-1)).toContain("You are TUI UI's coordinator agent");
 });
 
 test("keeps the promptbox draft in localStorage per session", async ({ page, ctx }) => {
@@ -448,7 +442,7 @@ test("exposes real and fake launcher presets as one-click button rows", async ({
     }));
   });
   expect(rows).toMatchObject([
-    { buttons: ["codex", "claude", "opencode"], fakeagent: "fakeagent" },
+    { buttons: ["Coordinator", "Codex", "Claude", "OpenCode"], fakeagent: "fakeagent" },
   ]);
 
   await page.getByRole("textbox", { name: "Working directory" }).fill(ctx.tempRoot);
