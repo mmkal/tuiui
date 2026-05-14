@@ -25,7 +25,7 @@ import {
 } from "./idle-notifications.ts";
 import { showToast } from "./toast.ts";
 import {
-  createBrowserVoiceRecognizer,
+  createPreferredBrowserVoiceRecognizer,
   createBrowserVoiceSpeaker,
   createVoiceLoop,
   type VoiceLoop,
@@ -819,6 +819,13 @@ async function renderHome() {
               <span>fakeagent</span>
             </label>
           </div>
+          <div class="coordinator-voice-row">
+            <button
+              type="button"
+              class="secondary-button coordinator-voice-button"
+              data-action="talk-to-coordinator"
+            >Talk to coordinator</button>
+          </div>
         </form>
       </section>
       <section class="recent-agents" aria-label="Recent agent sessions" data-testid="recent-agents">
@@ -892,6 +899,10 @@ async function renderHome() {
       });
     });
   }
+
+  form.querySelector<HTMLButtonElement>("[data-action='talk-to-coordinator']")?.addEventListener("click", async () => {
+    await openOrLaunchCoordinator();
+  });
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1015,6 +1026,32 @@ async function renderHome() {
     });
     history.pushState({}, "", `/sessions/${result.id}`);
     await renderRoute();
+  }
+
+  async function openOrLaunchCoordinator() {
+    const existing = sessions.find((session) => session.title === "coordinator" && session.lifecycle === "running");
+    if (existing) {
+      history.pushState({}, "", `/sessions/${existing.id}`);
+      await renderRoute();
+      return;
+    }
+    const coordinator = presets.get("coordinator");
+    if (!coordinator) {
+      showToast({
+        id: "coordinator-voice-missing",
+        title: "Coordinator unavailable",
+        message: "No coordinator launch preset is available.",
+        durationMs: 5_000,
+      });
+      return;
+    }
+    await launchSession({
+      command: coordinator.command,
+      args: coordinator.args,
+      cwd: currentLaunchCwd(),
+      fakeAgent: fakeAgentForCommand(coordinator.command),
+      coordinator: true,
+    });
   }
 }
 
@@ -1760,7 +1797,7 @@ function dragEventHasFiles(event: DragEvent) {
 function setupVoiceControls(sessionId: string, textarea: HTMLTextAreaElement) {
   unsubscribeVoiceLoop?.();
   voiceLoop = createVoiceLoop({
-    recognizer: window.__tuiuiVoiceTest?.recognizer || createBrowserVoiceRecognizer(),
+    recognizer: window.__tuiuiVoiceTest?.recognizer || createPreferredBrowserVoiceRecognizer(),
     speaker: window.__tuiuiVoiceTest?.speaker || createBrowserVoiceSpeaker(),
     now: window.__tuiuiVoiceTest?.now || (() => Date.now()),
     minReadbackDelayMs: Number(window.__tuiuiVoiceTest?.minReadbackDelayMs || 700),

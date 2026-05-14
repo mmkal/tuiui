@@ -251,6 +251,16 @@ test("launches the coordinator as a normal TUI session with MCP tools", async ({
   expect(payload.args.at(-1)).toContain("You are TUI UI's coordinator agent");
 });
 
+test("opens a coordinator session from the talk to coordinator shortcut", async ({ page, ctx }) => {
+  await page.goto(ctx.baseUrl);
+  await page.getByRole("checkbox", { name: "fakeagent" }).check();
+  await page.getByRole("button", { name: "Talk to coordinator" }).click();
+
+  await expect(page).toHaveURL(/\/sessions\/tuiui_[a-f0-9]+$/);
+  await expect(page.getByTestId("rendered-terminal")).toContainText("TUI UI's coordinator agent");
+  await expect(page.getByRole("button", { name: "Push to talk" })).toBeVisible();
+});
+
 test("keeps the promptbox draft in localStorage per session", async ({ page, ctx }) => {
   await launchFakeCodex(page, ctx);
   const firstSessionId = (await fetchSessionPayload(page)).id;
