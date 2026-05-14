@@ -5,7 +5,7 @@ size: large
 
 # Meta-Agent With Tools
 
-Status: Pivoting after product review. The reusable coordination tools and MCP wrapper are still the right foundation. The browser-specific coordinator chat route, server-side SDK thread, fake coordinator mode, and coordinator-specific UI are being removed. The coordinator should launch as a normal managed Codex session in the existing TUI, with MCP tools wired into that Codex process.
+Status: Implementation pivot is in place and the focused coordinator runtime tests are passing. The reusable coordination tools and MCP wrapper remain the foundation. The browser-specific coordinator chat route, server-side SDK thread, fake coordinator mode, and coordinator-specific UI have been removed. Remaining work is full verification, fresh PR media/body, demo refresh, and moving this task back to complete.
 
 ## Goal
 
@@ -45,7 +45,7 @@ Tool parameters should use bare string agent ids. Rich agent objects are returne
 
 The coordinator may inspect, brief, subscribe, and send prompts to managed sessions. It should not kill, archive, rebase, merge, push, close PRs, or run arbitrary shell commands through the coordination tools in this slice.
 
-`promptAgent` should be described to Codex as a user-visible prompt forwarder. The coordinator should use it when the human explicitly asks it to tell an agent something, not as an autonomous idle-event reaction. Because the coordinator is now a normal session, the deterministic gate should derive authority from the coordinator session's latest human-entered stdin instead of from a custom chat route.
+`promptAgent` should be described to Codex as a user-visible prompt forwarder. The coordinator should use it when the human explicitly asks it to tell an agent something, not as an autonomous idle-event reaction. Because the coordinator is now a normal session, the deterministic gate derives authority from the coordinator session's latest stdin event instead of from a custom chat route. A successful forward consumes the grant for that `(stdinEventId, agentId)` pair.
 
 ## Checklist
 
@@ -60,6 +60,7 @@ The coordinator may inspect, brief, subscribe, and send prompts to managed sessi
 - [x] Wire subscribed busy-to-idle transitions to the managed coordinator session. _Subscribed managed sessions now schedule an idle check and inject an event prompt into the coordinator session on a busy-to-idle transition._
 - [x] Replace server/ORPC coordinator tests with managed-session MCP tests. _Added `test/coordinator-runtime.test.ts`, which exercises MCP auth, list/brief/clash tools, prompt forwarding, and idle-event injection through normal session APIs._
 - [x] Replace the Playwright coordinator-route spec with normal session launch coverage. _Updated `spec/tuiui.spec.ts` so the browser proof launches a coordinator session through the existing TUI route, not a bespoke coordinator page._
+- [x] Grill and document the managed-session authority decision. _Captured the pivot grill in `tasks/meta-agent-with-tools.pivot-grill.md` and revised `docs/adr/0002-meta-agent-with-tools.md` to record the normal-session architecture plus consumed prompt grants._
 - [ ] Run typecheck, unit tests, Playwright specs, and update PR media/body. _The PR body needs fresh screenshots or video of the normal TUI coordinator flow plus the Tailscale demo link._
 - [ ] Move this task back to `tasks/complete/` once the PR branch is complete. _Keep it open until the pivot is implemented and verified._
 
@@ -68,6 +69,7 @@ The coordinator may inspect, brief, subscribe, and send prompts to managed sessi
 - [guess: implementation route] Use an HTTP MCP endpoint on the same TUI UI server because installed `codex mcp add --help` supports streamable HTTP MCP servers with `--url` and bearer token env vars.
 - [guess: scope control] Idle-event injection should wake the coordinator session and record a visible note, but should not automatically call `promptAgent` on another worker.
 - [guess: authority] The latest coordinator stdin event is the right deterministic source for `promptAgent` forwarding authority because it preserves the normal TUI surface without giving idle-event injections write authority.
+- [guess: authority] A successful `promptAgent` call should consume the grant for one target so a model cannot repeatedly write to the same worker from one human instruction.
 - [guess: PR metadata] `prNumber` should be best-effort only. `gh pr view --json number` can fail because GitHub CLI auth, network, or branch state is unavailable; `listAgents()` should still succeed.
 
 ## Out Of Scope
@@ -93,3 +95,4 @@ The coordinator may inspect, brief, subscribe, and send prompts to managed sessi
 - 2026-05-14: Post-review authority hardening added a deterministic per-turn `promptAgent` gate. The server only permits a `promptAgent` tool call during a coordinator turn when the human prompt explicitly names a promptable agent with verbs like "tell" or "ask"; event turns and broad status questions have no forwarding authority.
 - 2026-05-14: Product review rejected the custom coordinator UI. The next pass treats the coordinator as a normal Codex session rendered through the existing TUI, with only its tools and role prompt made special.
 - 2026-05-14: Replaced the server-side SDK thread and custom browser route with a coordinator launch preset. Focused verification passed with `bun run typecheck` and `bun test test/coordinator-runtime.test.ts test/coordinator-tools.test.ts test/coordinator-mcp.test.ts`.
+- 2026-05-14: Ran the requested grill-you pass for the managed-session authority model. The resulting hardening consumes one `promptAgent` grant per target per latest coordinator stdin event.

@@ -215,6 +215,7 @@ type CoordinatorState = {
   mcpToken: string;
   subscriptions: Map<string, CoordinatorSubscription>;
   lastAgentStatuses: Map<string, SessionStatus>;
+  consumedPromptAgentGrants: Set<string>;
 };
 
 type CoordinatorSubscription = {
@@ -524,6 +525,7 @@ function createCoordinatorState(): CoordinatorState {
     mcpToken: process.env.TUIUI_COORDINATOR_MCP_TOKEN || randomBytes(32).toString("hex"),
     subscriptions: new Map(),
     lastAgentStatuses: new Map(),
+    consumedPromptAgentGrants: new Set(),
   };
 }
 
@@ -625,14 +627,19 @@ async function coordinatorPromptAgent(state: ServerState, agentId: string, promp
   if (agentId === state.coordinator.sessionId) {
     throw new Error("The coordinator cannot prompt itself");
   }
-  if (!coordinatorLatestPromptAuthorizesPromptAgent(state, agentId)) {
+  const authorization = coordinatorLatestPromptAgentAuthorization(state, agentId);
+  if (!authorization) {
     throw new Error(`promptAgent is not authorized for ${agentId} by the coordinator session's latest human prompt`);
+  }
+  if (state.coordinator.consumedPromptAgentGrants.has(authorization.grantKey)) {
+    throw new Error(`promptAgent authorization for ${agentId} has already been used for the coordinator session's latest human prompt`);
   }
   const text = String(prompt || "").trim();
   if (!text) {
     throw new Error("prompt is required");
   }
   await sendToSession(state, session, text, true);
+  state.coordinator.consumedPromptAgentGrants.add(authorization.grantKey);
   const createdAt = new Date().toISOString();
   return {
     ok: true,
@@ -702,16 +709,19 @@ function createCoordinatorEventPrompt(prompt: string) {
   ].join("\n\n");
 }
 
-function coordinatorLatestPromptAuthorizesPromptAgent(state: ServerState, agentId: string) {
+function coordinatorLatestPromptAgentAuthorization(state: ServerState, agentId: string) {
   const coordinator = state.sessions.get(state.coordinator.sessionId);
   if (!coordinator) {
-    return false;
+    return null;
   }
   const latestPrompt = [...coordinator.stdinEvents].reverse().find((event) => Boolean(event.text.trim()));
   if (!latestPrompt) {
-    return false;
+    return null;
   }
-  return findExplicitPromptAgentTargets(listCoordinatorAgents(state), latestPrompt.text).includes(agentId);
+  if (!findExplicitPromptAgentTargets(listCoordinatorAgents(state), latestPrompt.text).includes(agentId)) {
+    return null;
+  }
+  return { grantKey: `${latestPrompt.id}:${agentId}` };
 }
 
 function sessionsListPayload(state: ServerState) {

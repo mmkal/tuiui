@@ -97,6 +97,13 @@ test("coordinator tools are attached to a normal managed session", async () => {
     const payload = await client.sessions.get({ sessionId: second.id });
     return payload.stdinEvents.map((event) => event.text).join("\n");
   }, (text) => text.includes("review the auth gate"));
+  await expect(await mcp.client.callTool({
+    name: "promptAgent",
+    arguments: { agentId: second.id, prompt: "send a second message" },
+  })).toMatchObject({
+    isError: true,
+    content: [expect.objectContaining({ text: expect.stringContaining("already been used") })],
+  });
 
   await expect(await mcp.client.callTool({
     name: "subscribe",

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted, 2026-05-14.
+Accepted, 2026-05-14. Revised after product review on 2026-05-14.
 
 ## Context
 
@@ -10,34 +10,41 @@ The previous coordinator direction treated the product mostly as a summary or vi
 
 The coordination capabilities also need to be reusable later from deterministic flows. They should not only exist as prompt text inside one Codex conversation.
 
-The installed `@openai/codex-sdk@0.129.0` can start and resume Codex threads, continue a thread with repeated `run()` calls, and pass Codex CLI config overrides. It does not expose a direct TypeScript callback-tools parameter. The official Codex docs describe MCP servers as the supported way to add tools to Codex.
+The first implementation tried a server-side Codex SDK thread with a custom browser `/coordinator` chat route. Product review rejected that shape. The coordinator is not special because it has custom UI; it is special because it has a coordination role and tools.
+
+Installed Codex CLI help confirms that interactive Codex sessions accept config overrides with `-c`, can start with an initial prompt, and can configure streamable HTTP MCP servers with a bearer-token environment variable. That is enough to run the coordinator as a normal TUI-managed Codex process while still giving it tools.
 
 ## Decision
 
-The coordinator will be a server-side Codex SDK thread, not a PTY-backed managed session.
+The coordinator is a normal PTY-backed Codex session rendered through the existing `/sessions/:id` TUI. TUI UI exposes a `coordinator` launch preset that starts `codex` with:
 
-TUI UI will implement coordination as deterministic TypeScript functions first:
+- a local streamable HTTP MCP server at `/mcp/coordinator`;
+- `listAgents`, `getBriefing`, `promptAgent`, `subscribe`, and `findClashes` enabled;
+- a coordinator role prompt as the initial Codex prompt;
+- read-only sandboxing and normal interactive approval behavior.
 
-- list agents
-- get an agent briefing
-- prompt an agent
-- subscribe to an agent's idle transition
-- find exact work clashes
+TUI UI implements coordination as deterministic TypeScript functions first:
 
-TUI UI will expose those functions to the coordinator through MCP, using either a same-server streamable HTTP MCP endpoint or a stdio MCP command if the HTTP path proves awkward in the local SDK/CLI flow.
+- list active and recent agents with status, task preview, route path, git metadata, dirty files, and best-effort PR number;
+- get an agent briefing, preferring the current structured session brief and falling back to provider or terminal snapshots;
+- prompt a live managed agent through the existing session input path;
+- subscribe to a live managed agent's idle transition;
+- find exact dirty-file, same-branch, and same-PR clashes.
 
-The browser will expose a coordinator chat route and Home entry point through the existing ORPC client surface. This slice will not add coordinator-specific legacy JSON endpoints. The coordinator will not be listed as a normal managed session because it supervises managed sessions rather than running inside one.
+The MCP endpoint is protected by a per-server bearer token. The server passes that token only to coordinator sessions through `TUIUI_COORDINATOR_MCP_TOKEN`.
 
-`promptAgent` remains a tool, but tool availability is not enough authority to write into another agent. TUI UI will add a deterministic per-turn gate: the server permits `promptAgent` only while handling a human coordinator prompt that explicitly names a promptable agent with a forwarding verb such as "tell", "ask", "prompt", "message", or "send". Broad status questions and injected idle-event turns have no prompt-forwarding authority.
+`promptAgent` remains a tool, but tool availability is not enough authority to write into another agent. The server permits `promptAgent(agentId, prompt)` only when the coordinator session's latest non-empty stdin event explicitly names that `agentId` with a forwarding verb such as "tell", "ask", "prompt", "message", or "send". A successful call consumes the grant for that `(stdinEventId, agentId)` pair. One human prompt can authorize multiple target agents if it explicitly names them, but only one successful call per target.
+
+Subscribed idle events are injected into the coordinator session through the same session input path. That means an idle event becomes the latest stdin event and intentionally revokes any older human forwarding grant. Idle events do not contain forwarding verbs, so they cannot authorize autonomous `promptAgent` calls.
 
 ## Consequences
 
-The useful coordination logic is testable without Codex. Later deterministic automations can call the same functions directly.
+The useful coordination logic is testable without Codex and can be reused later by deterministic automations.
 
-The Codex coordinator can use natural language to explain the deterministic state, but exact clash detection remains auditable TypeScript set logic.
+The browser does not need coordinator-specific chat state, polling, ORPC get/send endpoints, custom CSS, or a fake coordinator mode. The existing session TUI is the coordinator UI.
 
-The first implementation needs explicit coordinator server state: thread id, message/audit history, a serialized run queue, subscriptions, and idle-event injection.
+The coordinator can use natural language to explain deterministic state, but exact clash detection remains auditable TypeScript set logic.
 
-`promptAgent` is intentionally narrow. It forwards a user-visible prompt through existing managed-session input paths only during a server-authorized human turn. It does not grant the coordinator general shell, kill, archive, merge, or PR authority.
+`promptAgent` is intentionally narrow. It forwards a user-visible prompt through existing managed-session input paths only during a server-authorized human turn. It does not grant shell, kill, archive, merge, push, PR, or history-rewrite authority.
 
-Subscriptions are also limited to live managed sessions. External recent Codex sessions and exited sessions can be inspected, but they cannot promise a TUI UI idle callback.
+Subscriptions are limited to live managed sessions. External recent Codex sessions and exited sessions can be inspected, but they cannot promise a TUI UI idle callback.
