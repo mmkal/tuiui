@@ -331,6 +331,7 @@ function startServer(options: { host: string; port: number; state: ServerState }
       "/": homepage,
       "/sessions": homepage,
       "/sessions/:id": homepage,
+      "/factory-floor": homepage,
       "/health": {
         GET: () => Response.json({ ok: true }),
       },
