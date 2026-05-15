@@ -496,7 +496,9 @@ test("renders home before recent agent sessions finish loading", async ({ page, 
 
   releaseRecentSessions();
 
-  await expect(page.locator(".recent-session-group[data-depth='0'] > summary").filter({ hasText: ctx.workspaceDir })).toContainText("1 session");
+  await expect(page.getByTestId("recent-agent-count")).toHaveText("1 active in 24h");
+  await expect(page.locator(".recent-session-group")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Resume Codex session Async Codex/ })).toBeVisible();
 });
 
 test("groups recent sessions with jsonata expressions from the title details", async ({ page, ctx }) => {
@@ -567,7 +569,9 @@ test("groups recent sessions with jsonata expressions from the title details", a
 
   await page.setViewportSize({ width: 390, height: 800 });
   await page.goto(ctx.baseUrl);
-  await expect(page.locator(".recent-session-group[data-depth='0'] > summary").filter({ hasText: "~/project-a" })).toContainText("2 sessions");
+  await expect(page.getByTestId("recent-agent-count")).toHaveText("3 active in 24h");
+  await expect(page.locator(".recent-session-group")).toHaveCount(0);
+  await expect(page.locator(".agent-session-button")).toHaveCount(3);
   await page.locator("[data-testid='recent-session-group-config'] > summary").click();
   await page.getByTestId("recent-session-group-input").fill("status\ncwd");
 
