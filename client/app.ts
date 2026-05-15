@@ -786,7 +786,7 @@ async function renderHome() {
   observeHomeIdleNotificationSessions(sessions, [], displayHomeDirs);
   const launchCwdState = useLocalStorageState("tuiui-launch-cwd", cwd.cwd);
   const launchCwdValue = launchCwdState.getValue() || cwd.cwd;
-  const recentSessionGroupState = useLocalStorageState(recentSessionGroupStorageKey, "cwd");
+  const recentSessionGroupState = useLocalStorageState(recentSessionGroupStorageKey, "");
   const launchCommandOrder = ["coordinator", "codex", "claude", "opencode"];
   const quickLaunchCommands = launchCommandOrder
     .map((id) => commands.find((command) => command.id === id && !command.fakeAgent))
