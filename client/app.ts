@@ -1,8 +1,15 @@
+import { css } from "@codemirror/lang-css";
+import { html } from "@codemirror/lang-html";
+import { javascript } from "@codemirror/lang-javascript";
 import { json } from "@codemirror/lang-json";
+import { markdown } from "@codemirror/lang-markdown";
+import { python } from "@codemirror/lang-python";
+import { sql } from "@codemirror/lang-sql";
+import { xml } from "@codemirror/lang-xml";
 import { yaml } from "@codemirror/lang-yaml";
-import { EditorState } from "@codemirror/state";
+import { EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { vsCodeDark } from "@fsegurai/codemirror-theme-bundle";
+import { githubDark, vsCodeDark } from "@fsegurai/codemirror-theme-bundle";
 import jsonata from "@mmkal/jsonata/sync";
 import { FileTree } from "@pierre/trees";
 import { FitAddon } from "@xterm/addon-fit";
@@ -319,6 +326,7 @@ let renderer: "terminal" | "sdk" = "terminal";
 let dataEditorView: EditorView | null = null;
 let dataEditorKind: "" | "sdk-yaml" | "blocks-json" | "file-text" = "";
 let dataEditorDoc = "";
+let fileEditorLanguageKey = "";
 let briefEditorView: EditorView | null = null;
 let briefEditorDoc = "";
 let ideFileTree: FileTree | null = null;
@@ -2656,7 +2664,17 @@ function renderIdeScreenForCwd(screen: HTMLElement, cwd: string) {
     <section class="ide-layout" data-testid="ide-view">
       <aside class="ide-sidebar" aria-label="Files under current working directory">
         <header>
-          <strong>Files</strong>
+          <div class="ide-sidebar-title-row">
+            <strong>Files</strong>
+            <button
+              type="button"
+              class="ide-files-toggle"
+              data-action="toggle-ide-files"
+              aria-expanded="true"
+              aria-label="Collapse file tree"
+              title="Collapse file tree"
+            >▾</button>
+          </div>
           <code title="${escapeAttr(cwd)}" data-ide-cwd>${escapeHtml(displayCwd)}</code>
         </header>
         <div id="ide-file-tree" class="ide-tree-mount" data-testid="ide-file-tree">
@@ -2673,8 +2691,33 @@ function renderIdeScreenForCwd(screen: HTMLElement, cwd: string) {
       </section>
     </section>
   `;
+  bindIdeFilesToggle();
   mountFileTextEditor("");
   void loadIdeFileTree(cwd);
+}
+
+function bindIdeFilesToggle() {
+  const button = document.querySelector<HTMLButtonElement>("[data-action='toggle-ide-files']");
+  button?.addEventListener("click", () => {
+    const layout = document.querySelector<HTMLElement>(".ide-layout");
+    if (!layout) {
+      return;
+    }
+    setIdeFilesCollapsed(layout.dataset.filesCollapsed !== "true");
+  });
+}
+
+function setIdeFilesCollapsed(collapsed: boolean) {
+  const layout = document.querySelector<HTMLElement>(".ide-layout");
+  const button = document.querySelector<HTMLButtonElement>("[data-action='toggle-ide-files']");
+  if (!layout || !button) {
+    return;
+  }
+  layout.dataset.filesCollapsed = String(collapsed);
+  button.setAttribute("aria-expanded", String(!collapsed));
+  button.setAttribute("aria-label", collapsed ? "Expand file tree" : "Collapse file tree");
+  button.setAttribute("title", collapsed ? "Expand file tree" : "Collapse file tree");
+  button.textContent = collapsed ? "▸" : "▾";
 }
 
 async function loadIdeFileTree(cwd: string) {
@@ -2767,7 +2810,7 @@ async function selectIdeFile(cwd: string, filePath: string) {
   ideSelectedFilePath = filePath;
   setIdeFileChrome(filePath, "Loading");
   setIdeFileMessage("");
-  mountFileTextEditor("");
+  mountFileTextEditor("", filePath);
   try {
     const file = await clientApi.files.fileContent({ cwd, path: filePath });
     if (!isCurrentIdeCwd(cwd) || ideSelectedFilePath !== filePath) {
@@ -2794,25 +2837,28 @@ function renderIdeFileContent(file: SessionFileContentPayload) {
     setIdeFileMessage(file.message);
     return;
   }
-  mountFileTextEditor(file.content);
+  mountFileTextEditor(file.content, file.path);
   setIdeFileMessage("");
   requestAnimationFrame(() => dataEditorView?.requestMeasure());
 }
 
-function mountFileTextEditor(doc: string) {
+function mountFileTextEditor(doc: string, filePath = "") {
   const host = document.getElementById("ide-file-editor");
   if (!host) {
     return;
   }
-  if (!dataEditorView || dataEditorKind !== "file-text") {
+  const languageKey = fileLanguageKey(filePath);
+  if (!dataEditorView || dataEditorKind !== "file-text" || fileEditorLanguageKey !== languageKey) {
     destroyDataEditor();
+    const languageExtensions = fileLanguageExtensions(languageKey);
     dataEditorView = new EditorView({
       parent: host,
       state: EditorState.create({
         doc,
         extensions: [
           basicSetup,
-          vsCodeDark,
+          githubDark,
+          ...languageExtensions,
           EditorState.readOnly.of(true),
           EditorView.editable.of(false),
           EditorView.contentAttributes.of({ "aria-label": "IDE file content" }),
@@ -2822,9 +2868,89 @@ function mountFileTextEditor(doc: string) {
     });
     dataEditorKind = "file-text";
     dataEditorDoc = doc;
+    fileEditorLanguageKey = languageKey;
     return;
   }
   updateDataEditorDoc(doc);
+}
+
+function fileLanguageKey(filePath: string) {
+  const fileName = filePath.split("/").pop()?.toLowerCase() || "";
+  if (!fileName) {
+    return "";
+  }
+  if (fileName === "dockerfile") {
+    return "";
+  }
+  const extension = fileName.includes(".") ? fileName.split(".").pop() || "" : "";
+  if (["ts", "mts", "cts"].includes(extension)) {
+    return "typescript";
+  }
+  if (extension === "tsx") {
+    return "tsx";
+  }
+  if (["js", "mjs", "cjs"].includes(extension)) {
+    return "javascript";
+  }
+  if (extension === "jsx") {
+    return "jsx";
+  }
+  if (extension === "json") {
+    return "json";
+  }
+  if (["yaml", "yml"].includes(extension)) {
+    return "yaml";
+  }
+  if (["html", "htm"].includes(extension)) {
+    return "html";
+  }
+  if (["css", "scss", "less"].includes(extension)) {
+    return "css";
+  }
+  if (["md", "markdown", "mdx"].includes(extension)) {
+    return "markdown";
+  }
+  if (["py", "pyw"].includes(extension)) {
+    return "python";
+  }
+  if (["sql", "psql"].includes(extension)) {
+    return "sql";
+  }
+  if (["xml", "svg"].includes(extension)) {
+    return "xml";
+  }
+  return "";
+}
+
+function fileLanguageExtensions(languageKey: string): Extension[] {
+  switch (languageKey) {
+    case "typescript":
+      return [javascript({ typescript: true })];
+    case "tsx":
+      return [javascript({ jsx: true, typescript: true })];
+    case "javascript":
+      return [javascript()];
+    case "jsx":
+      return [javascript({ jsx: true })];
+    case "json":
+      return [json()];
+    case "yaml":
+      return [yaml()];
+    case "html":
+      return [html()];
+    case "css":
+      return [css()];
+    case "markdown":
+      return [markdown()];
+    case "python":
+      return [python()];
+    case "sql":
+      return [sql()];
+    case "xml":
+      return [xml()];
+    default:
+      return [];
+  }
 }
 
 function firstPreviewFilePath(paths: string[]) {
@@ -3727,11 +3853,11 @@ function editorTheme() {
 
 function fileEditorTheme() {
   return createEditorTheme({
-    fontSize: "12px",
-    lineHeight: "1.45",
-    contentPadding: "8px 0",
-    linePadding: "0 10px",
-    lineNumberMinWidth: "36px",
+    fontSize: "10px",
+    lineHeight: "1.4",
+    contentPadding: "6px 0",
+    linePadding: "0 8px",
+    lineNumberMinWidth: "30px",
   });
 }
 
@@ -3805,6 +3931,7 @@ function destroyDataEditor() {
   dataEditorView = null;
   dataEditorKind = "";
   dataEditorDoc = "";
+  fileEditorLanguageKey = "";
   briefEditorView?.destroy();
   briefEditorView = null;
   briefEditorDoc = "";

@@ -289,6 +289,14 @@ test("opens an IDE view for the session cwd and previews text files", async ({ p
   await page.getByRole("treeitem", { name: "README.md", exact: true }).first().click();
 
   await expect(page.getByTestId("ide-file-editor")).toContainText("This file comes from the session cwd.");
+
+  await page.setViewportSize({ width: 390, height: 720 });
+
+  await expect(page.getByRole("button", { name: "Collapse file tree" })).toBeVisible();
+  await page.getByRole("button", { name: "Collapse file tree" }).click();
+  await expect(page.getByTestId("ide-file-tree")).toBeHidden();
+  await page.getByRole("button", { name: "Expand file tree" }).click();
+  await expect(page.getByTestId("ide-file-tree")).toBeVisible();
 });
 
 test("opens a coordinator session from the coordinator shortcut", async ({ page, ctx }) => {
