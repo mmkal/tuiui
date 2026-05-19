@@ -279,6 +279,9 @@ test("opens an IDE view for the session cwd and previews text files", async ({ p
   await expect(page.getByRole("treeitem", { name: "README.md", exact: true }).first()).toBeVisible();
   await expect(page.getByRole("treeitem", { name: "ignored-package", exact: true })).toHaveCount(0);
   await expect(page.getByTestId("ide-file-editor")).toContainText("export const answer = 42");
+  await expect.poll(async () => await page.locator(".ide-file-editor .cm-line").first().evaluate((element) => {
+    return getComputedStyle(element).fontSize;
+  })).toBe("7px");
 
   await page.reload();
 

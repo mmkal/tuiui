@@ -3005,7 +3005,13 @@ function ideFileTreeCss() {
       --trees-selected-bg-override: #64d2c8;
       --trees-selected-fg-override: #071112;
       color: #dce5ef;
-      font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+      font: 9px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
+    }
+    * {
+      font-size: inherit;
+      line-height: inherit;
     }
   `;
 }
@@ -3853,11 +3859,11 @@ function editorTheme() {
 
 function fileEditorTheme() {
   return createEditorTheme({
-    fontSize: "9px",
-    lineHeight: "1.35",
-    contentPadding: "6px 0",
-    linePadding: "0 8px",
-    lineNumberMinWidth: "28px",
+    fontSize: "7px",
+    lineHeight: "1.32",
+    contentPadding: "5px 0",
+    linePadding: "0 6px",
+    lineNumberMinWidth: "22px",
   });
 }
 
@@ -3878,11 +3884,16 @@ function createEditorTheme(input: {
     },
     ".cm-scroller": {
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+      fontSize: input.fontSize,
+      lineHeight: input.lineHeight,
     },
     ".cm-content": {
+      fontSize: input.fontSize,
+      lineHeight: input.lineHeight,
       padding: input.contentPadding,
     },
     ".cm-line": {
+      fontSize: input.fontSize,
       lineHeight: input.lineHeight,
       padding: input.linePadding,
     },
@@ -3890,9 +3901,11 @@ function createEditorTheme(input: {
       backgroundColor: "#11161d",
       color: "#748293",
       borderRightColor: "#2c333d",
+      fontSize: input.fontSize,
       lineHeight: input.lineHeight,
     },
     ".cm-gutterElement": {
+      fontSize: input.fontSize,
       lineHeight: input.lineHeight,
       paddingTop: "0 !important",
       paddingBottom: "0 !important",

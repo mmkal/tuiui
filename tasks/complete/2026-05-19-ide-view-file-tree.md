@@ -5,7 +5,7 @@ size: medium
 
 # IDE View File Tree
 
-Status summary: done. The session hamburger menu opens a cwd-scoped IDE route with a Pierre Trees file tree and a read-only CodeMirror file preview; the latest follow-up adds mobile file-tree collapse, 9px editor text, and common CodeMirror language support.
+Status summary: done. The session hamburger menu opens a cwd-scoped IDE route with a Pierre Trees file tree and a read-only CodeMirror file preview; the latest follow-up adds mobile file-tree collapse, 7px editor text, and common CodeMirror language support.
 
 ## Goal
 
@@ -24,7 +24,7 @@ Add a lightweight IDE view to a session page so the user can open the hamburger 
 - [x] Add an IDE route from the session hamburger menu. _The `IDE` menu button now navigates to `/ide?cwd=...` so refresh keeps the file browser instead of returning to the session view._
 - [x] Render a dense file tree with directory disclosure controls and selected file state. _Mounted `@pierre/trees` in the IDE sidebar using compact density, open initial expansion, and path-first selection._
 - [x] Render selected text file contents in read-only CodeMirror. _Added the `file-text` editor mode in `client/app.ts` and reused the existing CodeMirror dark theme/read-only plumbing._
-- [x] Fix file preview typography. _Added a dedicated file editor theme and tuned the file preview back down to compact 9px code text._
+- [x] Fix file preview typography. _Added a dedicated file editor theme and tuned the file preview down to compact 7px code text, with an explicit computed-style regression check._
 - [x] Add common CodeMirror language highlighting. _The file viewer picks language extensions by file path for TS/JS/JSX/TSX, JSON, YAML, HTML, CSS, Markdown, Python, SQL, XML, and SVG._
 - [x] Make the file tree collapsible on mobile. _Added a mobile-only toggle in the file tree header and Playwright coverage for collapse/expand plus a nonzero tree height._
 - [x] Show useful empty/error states for missing cwd, binary/oversized files, and unavailable files. _The server returns binary/too-large states and the IDE pane renders messages while leaving the editor read-only._
