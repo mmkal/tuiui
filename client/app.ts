@@ -315,15 +315,15 @@ type StoredChord = {
 const app = document.getElementById("app")!;
 let events: EventSource | null = null;
 let activeSession: SessionPayload | null = null;
-let renderer: "terminal" | "sdk" | "ide" = "terminal";
+let renderer: "terminal" | "sdk" = "terminal";
 let dataEditorView: EditorView | null = null;
 let dataEditorKind: "" | "sdk-yaml" | "blocks-json" | "file-text" = "";
 let dataEditorDoc = "";
 let briefEditorView: EditorView | null = null;
 let briefEditorDoc = "";
 let ideFileTree: FileTree | null = null;
-let ideFileTreeSessionId = "";
-let ideFileTreeLoadingSessionId = "";
+let ideFileTreeCwd = "";
+let ideFileTreeLoadingCwd = "";
 let ideSelectedFilePath = "";
 let eventsPaused = false;
 let terminalResizeObserver: ResizeObserver | null = null;
@@ -777,6 +777,11 @@ async function renderRoute() {
     return;
   }
 
+  if (location.pathname === "/ide") {
+    await renderIdeRoute();
+    return;
+  }
+
   if (location.pathname === "/factory-floor") {
     await renderFactoryFloorHome();
     return;
@@ -818,6 +823,29 @@ async function fetchSessionRecovery(sessionId: string) {
   } catch {
     return null;
   }
+}
+
+async function renderIdeRoute() {
+  const url = new URL(location.href);
+  const requestedCwd = url.searchParams.get("cwd") || "";
+  const cwd = requestedCwd || (await clientApi.cwd()).cwd;
+  if (!requestedCwd) {
+    history.replaceState({}, "", `/ide?cwd=${encodeURIComponent(cwd)}`);
+  }
+  const displayCwd = formatPathForDisplay(cwd, homeDirsForDisplay({ cwd }));
+  document.title = `${displayCwd} · IDE · TUI UI`;
+  app.innerHTML = `
+    <main class="layout ide-route-layout">
+      <header class="topbar ide-route-topbar">
+        <a class="brand" href="/">tuiui</a>
+        <span class="muted">IDE</span>
+        <code class="command app-title" title="${escapeAttr(cwd)}" data-testid="ide-cwd">${escapeHtml(displayCwd)}</code>
+      </header>
+      <section id="screen" class="screen ide-screen" data-testid="semantic-screen"></section>
+    </main>
+  `;
+  const screen = document.getElementById("screen")!;
+  renderIdeScreenForCwd(screen, cwd);
 }
 
 async function renderHome() {
@@ -1613,7 +1641,7 @@ async function renderSession(sessionId: string) {
               </div>
               <div class="toolbar" role="group" aria-label="Session controls">
                 <button type="button" class="icon-button" data-renderer="terminal" aria-pressed="${renderer === "terminal"}">TTY</button>
-                <button type="button" class="icon-button" data-renderer="ide" aria-pressed="${renderer === "ide"}">IDE</button>
+                <button type="button" class="icon-button" data-action="open-ide-view">IDE</button>
                 <button type="button" class="icon-button" data-renderer="sdk" aria-pressed="${renderer === "sdk"}">Debug</button>
                 <button type="button" class="icon-button" data-action="pause-events" aria-pressed="false">Pause events</button>
                 <button type="button" class="icon-button" data-action="relayout">Relayout</button>
@@ -1784,10 +1812,20 @@ function bindSessionControls(sessionId: string) {
     void sendChordSequence(sessionId, chord.sequence, chord.id);
   });
 
+  document.querySelector<HTMLButtonElement>("[data-action='open-ide-view']")?.addEventListener("click", () => {
+    const cwd = activeSession?.cwd || "";
+    if (!cwd) {
+      return;
+    }
+    history.pushState({}, "", `/ide?cwd=${encodeURIComponent(cwd)}`);
+    closeSessionMenu();
+    void renderRoute();
+  });
+
   document.querySelectorAll<HTMLButtonElement>("[data-renderer]").forEach((button) => {
     button.addEventListener("click", () => {
       const nextRenderer = button.dataset.renderer;
-      renderer = nextRenderer === "sdk" ? "sdk" : nextRenderer === "ide" ? "ide" : "terminal";
+      renderer = nextRenderer === "sdk" ? "sdk" : "terminal";
       renderSessionPayload(activeSession);
       if (renderer === "sdk") {
         void refreshSdk(sessionId).catch((error) => {
@@ -2372,10 +2410,6 @@ function renderSessionPayload(
     stopTerminalAutoResize();
     destroyXterm();
     renderSdkScreen(screen, payload);
-  } else if (renderer === "ide") {
-    stopTerminalAutoResize();
-    destroyXterm();
-    renderIdeScreen(screen, payload);
   }
 
   const stdinLog = document.querySelector<HTMLElement>("[data-testid='stdin-log']");
@@ -2606,23 +2640,24 @@ function renderTerminalScreen(screen: HTMLElement, payload: SessionPayload) {
   startTerminalAutoResize(payload.id);
 }
 
-function renderIdeScreen(screen: HTMLElement, payload: SessionPayload) {
+function renderIdeScreenForCwd(screen: HTMLElement, cwd: string) {
   screen.className = "screen ide-screen";
   const existingLayout = screen.querySelector(".ide-layout");
-  if (existingLayout && ideFileTreeSessionId === payload.id) {
+  if (existingLayout && ideFileTreeCwd === cwd) {
     return;
   }
 
   destroyDataEditor();
   destroyIdeFileTree();
-  ideFileTreeSessionId = payload.id;
+  ideFileTreeCwd = cwd;
   ideSelectedFilePath = "";
+  const displayCwd = formatPathForDisplay(cwd, homeDirsForDisplay({ cwd }));
   screen.innerHTML = `
     <section class="ide-layout" data-testid="ide-view">
       <aside class="ide-sidebar" aria-label="Files under current working directory">
         <header>
           <strong>Files</strong>
-          <code title="${escapeAttr(payload.cwd)}">${escapeHtml(formatPathForDisplay(payload.cwd, homeDirsForDisplay({ cwd: payload.cwd })))}</code>
+          <code title="${escapeAttr(cwd)}" data-ide-cwd>${escapeHtml(displayCwd)}</code>
         </header>
         <div id="ide-file-tree" class="ide-tree-mount" data-testid="ide-file-tree">
           <p class="empty">Loading files</p>
@@ -2639,39 +2674,40 @@ function renderIdeScreen(screen: HTMLElement, payload: SessionPayload) {
     </section>
   `;
   mountFileTextEditor("");
-  void loadIdeFileTree(payload.id);
+  void loadIdeFileTree(cwd);
 }
 
-async function loadIdeFileTree(sessionId: string) {
-  if (ideFileTreeLoadingSessionId === sessionId) {
+async function loadIdeFileTree(cwd: string) {
+  if (ideFileTreeLoadingCwd === cwd) {
     return;
   }
-  ideFileTreeLoadingSessionId = sessionId;
+  ideFileTreeLoadingCwd = cwd;
   try {
-    const tree = await clientApi.sessions.fileTree({ sessionId });
-    if (renderer !== "ide" || activeSession?.id !== sessionId) {
+    const tree = await clientApi.files.fileTree({ cwd });
+    if (!isCurrentIdeCwd(cwd)) {
       return;
     }
-    renderIdeFileTree(sessionId, tree);
+    renderIdeFileTree(cwd, tree);
   } catch (error) {
-    if (renderer === "ide" && activeSession?.id === sessionId) {
+    if (isCurrentIdeCwd(cwd)) {
       renderIdeTreeError(error);
     }
   } finally {
-    if (ideFileTreeLoadingSessionId === sessionId) {
-      ideFileTreeLoadingSessionId = "";
+    if (ideFileTreeLoadingCwd === cwd) {
+      ideFileTreeLoadingCwd = "";
     }
   }
 }
 
-function renderIdeFileTree(sessionId: string, payload: SessionFileTreePayload) {
+function renderIdeFileTree(cwd: string, payload: SessionFileTreePayload) {
   const host = document.getElementById("ide-file-tree");
   if (!host) {
     return;
   }
   destroyIdeFileTree();
-  ideFileTreeSessionId = sessionId;
+  ideFileTreeCwd = cwd;
   host.textContent = "";
+  setIdeCwdChrome(payload.cwd);
 
   if (!payload.paths.length) {
     host.innerHTML = `<p class="empty">No files</p>`;
@@ -2698,7 +2734,7 @@ function renderIdeFileTree(sessionId: string, payload: SessionFileTreePayload) {
       if (!item || item.isDirectory()) {
         return;
       }
-      void selectIdeFile(sessionId, selectedPath);
+      void selectIdeFile(cwd, selectedPath);
     },
   });
   ideFileTree.render({ containerWrapper: host });
@@ -2708,7 +2744,7 @@ function renderIdeFileTree(sessionId: string, payload: SessionFileTreePayload) {
     `);
   }
   if (firstFilePath) {
-    void selectIdeFile(sessionId, firstFilePath);
+    void selectIdeFile(cwd, firstFilePath);
   } else {
     setIdeFileMessage("No previewable files were found under this cwd.");
   }
@@ -2724,7 +2760,7 @@ function renderIdeTreeError(error: unknown) {
   setIdeFileMessage("File tree unavailable.");
 }
 
-async function selectIdeFile(sessionId: string, filePath: string) {
+async function selectIdeFile(cwd: string, filePath: string) {
   if (ideSelectedFilePath === filePath && dataEditorKind === "file-text") {
     return;
   }
@@ -2733,18 +2769,22 @@ async function selectIdeFile(sessionId: string, filePath: string) {
   setIdeFileMessage("");
   mountFileTextEditor("");
   try {
-    const file = await clientApi.sessions.fileContent({ sessionId, path: filePath });
-    if (renderer !== "ide" || activeSession?.id !== sessionId || ideSelectedFilePath !== filePath) {
+    const file = await clientApi.files.fileContent({ cwd, path: filePath });
+    if (!isCurrentIdeCwd(cwd) || ideSelectedFilePath !== filePath) {
       return;
     }
     renderIdeFileContent(file);
   } catch (error) {
-    if (renderer === "ide" && activeSession?.id === sessionId && ideSelectedFilePath === filePath) {
+    if (isCurrentIdeCwd(cwd) && ideSelectedFilePath === filePath) {
       setIdeFileChrome(filePath, "Unavailable");
       mountFileTextEditor("");
       setIdeFileMessage(String(error instanceof Error ? error.message : error));
     }
   }
+}
+
+function isCurrentIdeCwd(cwd: string) {
+  return location.pathname === "/ide" && ideFileTreeCwd === cwd;
 }
 
 function renderIdeFileContent(file: SessionFileContentPayload) {
@@ -2776,7 +2816,7 @@ function mountFileTextEditor(doc: string) {
           EditorState.readOnly.of(true),
           EditorView.editable.of(false),
           EditorView.contentAttributes.of({ "aria-label": "IDE file content" }),
-          editorTheme(),
+          fileEditorTheme(),
         ],
       }),
     });
@@ -2812,11 +2852,20 @@ function setIdeFileMessage(message: string) {
   element.hidden = !message;
 }
 
+function setIdeCwdChrome(cwd: string) {
+  const elements = document.querySelectorAll<HTMLElement>("[data-ide-cwd]");
+  const displayCwd = formatPathForDisplay(cwd, homeDirsForDisplay({ cwd }));
+  elements.forEach((element) => {
+    element.textContent = displayCwd;
+    element.title = cwd;
+  });
+}
+
 function destroyIdeFileTree() {
   ideFileTree?.cleanUp();
   ideFileTree = null;
-  ideFileTreeSessionId = "";
-  ideFileTreeLoadingSessionId = "";
+  ideFileTreeCwd = "";
+  ideFileTreeLoadingCwd = "";
   ideSelectedFilePath = "";
 }
 
@@ -2830,7 +2879,7 @@ function ideFileTreeCss() {
       --trees-selected-bg-override: #64d2c8;
       --trees-selected-fg-override: #071112;
       color: #dce5ef;
-      font: 11px/1.25 ui-monospace, SFMono-Regular, Menlo, monospace;
+      font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
     }
   `;
 }
@@ -3667,32 +3716,58 @@ function renderBlocksScreen(screen: HTMLElement, model: TerminalBlockModel) {
 }
 
 function editorTheme() {
+  return createEditorTheme({
+    fontSize: "10px",
+    lineHeight: "1.35",
+    contentPadding: "6px 0",
+    linePadding: "0 8px",
+    lineNumberMinWidth: "32px",
+  });
+}
+
+function fileEditorTheme() {
+  return createEditorTheme({
+    fontSize: "12px",
+    lineHeight: "1.45",
+    contentPadding: "8px 0",
+    linePadding: "0 10px",
+    lineNumberMinWidth: "36px",
+  });
+}
+
+function createEditorTheme(input: {
+  fontSize: string;
+  lineHeight: string;
+  contentPadding: string;
+  linePadding: string;
+  lineNumberMinWidth: string;
+}) {
   return EditorView.theme({
     "&": {
       height: "100%",
       backgroundColor: "#0d1014",
       color: "#eef2f7",
-      fontSize: "10px",
-      lineHeight: "1.35",
+      fontSize: input.fontSize,
+      lineHeight: input.lineHeight,
     },
     ".cm-scroller": {
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
     },
     ".cm-content": {
-      padding: "6px 0",
+      padding: input.contentPadding,
     },
     ".cm-line": {
-      lineHeight: "1.35",
-      padding: "0 8px",
+      lineHeight: input.lineHeight,
+      padding: input.linePadding,
     },
     ".cm-gutters": {
       backgroundColor: "#11161d",
       color: "#748293",
       borderRightColor: "#2c333d",
-      lineHeight: "1.35",
+      lineHeight: input.lineHeight,
     },
     ".cm-gutterElement": {
-      lineHeight: "1.35",
+      lineHeight: input.lineHeight,
       paddingTop: "0 !important",
       paddingBottom: "0 !important",
     },
@@ -3700,7 +3775,7 @@ function editorTheme() {
       display: "flex",
       alignItems: "center",
       justifyContent: "flex-end",
-      minWidth: "32px",
+      minWidth: input.lineNumberMinWidth,
       paddingLeft: "7px !important",
       paddingRight: "7px !important",
     },
@@ -3713,7 +3788,7 @@ function editorTheme() {
     ".cm-foldGutter span": {
       display: "inline-flex",
       alignItems: "center",
-      height: "1.35em",
+      height: `${input.lineHeight}em`,
       lineHeight: "1",
     },
     ".cm-activeLineGutter": {

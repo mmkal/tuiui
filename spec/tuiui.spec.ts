@@ -269,12 +269,22 @@ test("opens an IDE view for the session cwd and previews text files", async ({ p
 
   await clickSessionMenuButton(page, "IDE");
 
+  await expect(page).toHaveURL(/\/ide\?cwd=/);
+  const ideUrl = new URL(page.url());
+  expect(ideUrl.pathname).toBe("/ide");
+  expect(ideUrl.searchParams.get("cwd")).toBe(fs.realpathSync(ctx.workspaceDir));
   await expect(page.getByTestId("ide-view")).toBeVisible();
   await expect(page.getByRole("treeitem", { name: "src", exact: true }).first()).toBeVisible();
   await expect(page.getByRole("treeitem", { name: "tool.ts", exact: true }).first()).toBeVisible();
   await expect(page.getByRole("treeitem", { name: "README.md", exact: true }).first()).toBeVisible();
   await expect(page.getByRole("treeitem", { name: "ignored-package", exact: true })).toHaveCount(0);
   await expect(page.getByTestId("ide-file-editor")).toContainText("export const answer = 42");
+
+  await page.reload();
+
+  await expect(page).toHaveURL(/\/ide\?cwd=/);
+  await expect(page.getByTestId("ide-view")).toBeVisible();
+  await expect(page.getByTestId("rendered-terminal")).toHaveCount(0);
 
   await page.getByRole("treeitem", { name: "README.md", exact: true }).first().click();
 

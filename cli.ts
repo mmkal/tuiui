@@ -274,6 +274,8 @@ const resizeSessionInputSchema = sessionIdInputSchema.extend({
   rows: z.number().optional(),
 });
 const stdoutSessionInputSchema = sessionIdInputSchema.extend({ after: z.number().optional() });
+const cwdFileTreeInputSchema = z.object({ cwd: z.string() });
+const cwdFileContentInputSchema = cwdFileTreeInputSchema.extend({ path: z.string() });
 const sessionFileContentInputSchema = sessionIdInputSchema.extend({ path: z.string() });
 
 type CreateSessionBody = z.infer<typeof createSessionBodySchema>;
@@ -282,6 +284,8 @@ type SendSessionInput = z.infer<typeof sendSessionInputSchema>;
 type KeySessionInput = z.infer<typeof keySessionInputSchema>;
 type ResizeSessionInput = z.infer<typeof resizeSessionInputSchema>;
 type StdoutSessionInput = z.infer<typeof stdoutSessionInputSchema>;
+type CwdFileTreeInput = z.infer<typeof cwdFileTreeInputSchema>;
+type CwdFileContentInput = z.infer<typeof cwdFileContentInputSchema>;
 type SessionFileContentInput = z.infer<typeof sessionFileContentInputSchema>;
 
 type CommandPresetPayload = {
@@ -347,6 +351,7 @@ function startServer(options: { host: string; port: number; state: ServerState }
     idleTimeout: 255,
     routes: {
       "/": homepage,
+      "/ide": homepage,
       "/sessions": homepage,
       "/sessions/:id": homepage,
       "/factory-floor": homepage,
@@ -391,6 +396,10 @@ function createAppRouter(state: ServerState) {
     },
     codexSessions: {
       recent: orpc.handler(() => readRecentCodexSessions()),
+    },
+    files: {
+      fileTree: orpc.input(cwdFileTreeInputSchema).handler(({ input }) => cwdFileTreePayload(input)),
+      fileContent: orpc.input(cwdFileContentInputSchema).handler(({ input }) => cwdFileContentPayload(input)),
     },
     sessions: {
       list: orpc.handler(() => sessionsListPayload(state)),
@@ -807,12 +816,20 @@ async function stdoutSessionPayload(state: ServerState, input: StdoutSessionInpu
 
 async function sessionFileTreePayload(state: ServerState, sessionId: string) {
   const session = await liveSessionById(state, sessionId);
-  return readSessionFileTree(session.cwd);
+  return cwdFileTreePayload({ cwd: session.cwd });
 }
 
 async function sessionFileContentPayload(state: ServerState, input: SessionFileContentInput) {
   const session = await liveSessionById(state, input.sessionId);
-  return readSessionFileContent(session.cwd, input.path);
+  return cwdFileContentPayload({ cwd: session.cwd, path: input.path });
+}
+
+function cwdFileTreePayload(input: CwdFileTreeInput) {
+  return readCwdFileTree(input.cwd);
+}
+
+function cwdFileContentPayload(input: CwdFileContentInput) {
+  return readCwdFileContent(input.cwd, input.path);
 }
 
 function sessionRecoveryPayload(state: ServerState, sessionId: string) {
@@ -936,8 +953,8 @@ async function liveSessionById(state: ServerState, sessionId: string) {
   return session;
 }
 
-function readSessionFileTree(cwd: string) {
-  const root = fs.realpathSync(cwd);
+function readCwdFileTree(cwd: string) {
+  const root = safeRealDirectory(cwd);
   const state = {
     paths: [] as string[],
     truncated: false,
@@ -1025,13 +1042,13 @@ function resolveFileTreeEntryKind(root: string, absolutePath: string, entry: fs.
   }
 }
 
-function readSessionFileContent(cwd: string, requestedPath: string) {
+function readCwdFileContent(cwd: string, requestedPath: string) {
   const filePath = requestedPath.trim();
   if (!filePath || filePath.includes("\0")) {
     throw new ORPCError("BAD_REQUEST", { message: "file path is required" });
   }
 
-  const root = fs.realpathSync(cwd);
+  const root = safeRealDirectory(cwd);
   const absolutePath = path.resolve(root, filePath);
   let realPath: string;
   try {
@@ -1083,6 +1100,29 @@ function readSessionFileContent(cwd: string, requestedPath: string) {
     content: buffer.toString("utf8"),
     message: "",
   };
+}
+
+function safeRealDirectory(cwd: string) {
+  const requestedCwd = cwd.trim();
+  if (!requestedCwd || requestedCwd.includes("\0")) {
+    throw new ORPCError("BAD_REQUEST", { message: "cwd is required" });
+  }
+  let root: string;
+  try {
+    root = fs.realpathSync(requestedCwd);
+  } catch {
+    throw new ORPCError("NOT_FOUND", { message: "cwd not found" });
+  }
+  let stats: fs.Stats;
+  try {
+    stats = fs.statSync(root);
+  } catch {
+    throw new ORPCError("NOT_FOUND", { message: "cwd not found" });
+  }
+  if (!stats.isDirectory()) {
+    throw new ORPCError("CONFLICT", { message: "cwd is not a directory" });
+  }
+  return root;
 }
 
 function toFileTreePath(relativePath: string, directory: boolean) {
