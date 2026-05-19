@@ -292,6 +292,8 @@ test("opens an IDE view for the session cwd and previews text files", async ({ p
 
   await page.setViewportSize({ width: 390, height: 720 });
 
+  const mobileTreeBox = await page.getByTestId("ide-file-tree").boundingBox();
+  expect(mobileTreeBox?.height).toBeGreaterThan(120);
   await expect(page.getByRole("button", { name: "Collapse file tree" })).toBeVisible();
   await page.getByRole("button", { name: "Collapse file tree" }).click();
   await expect(page.getByTestId("ide-file-tree")).toBeHidden();

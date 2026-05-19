@@ -2999,7 +2999,7 @@ textarea[data-label="promptbox"][data-overflowing="true"] {
   }
 
   .ide-sidebar {
-    max-height: min(42dvh, 310px);
+    height: min(42dvh, 310px);
     border-bottom: 1px solid #252c36;
   }
 
@@ -3020,7 +3020,7 @@ textarea[data-label="promptbox"][data-overflowing="true"] {
   }
 
   .ide-layout[data-files-collapsed="true"] .ide-sidebar {
-    max-height: none;
+    height: auto;
   }
 
   .ide-layout[data-files-collapsed="true"] .ide-tree-mount,

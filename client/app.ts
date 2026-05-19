@@ -3853,11 +3853,11 @@ function editorTheme() {
 
 function fileEditorTheme() {
   return createEditorTheme({
-    fontSize: "10px",
-    lineHeight: "1.4",
+    fontSize: "9px",
+    lineHeight: "1.35",
     contentPadding: "6px 0",
     linePadding: "0 8px",
-    lineNumberMinWidth: "30px",
+    lineNumberMinWidth: "28px",
   });
 }
 
