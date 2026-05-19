@@ -255,6 +255,32 @@ test("launches the coordinator as a normal TUI session with MCP tools", async ({
   expect(payload.args.at(-1)).toContain("You are TUI UI's coordinator agent");
 });
 
+test("opens an IDE view for the session cwd and previews text files", async ({ page, ctx }) => {
+  fs.mkdirSync(path.join(ctx.workspaceDir, "src"), { recursive: true });
+  fs.mkdirSync(path.join(ctx.workspaceDir, "node_modules", "ignored-package"), { recursive: true });
+  fs.writeFileSync(path.join(ctx.workspaceDir, "README.md"), "# Workspace\n\nThis file comes from the session cwd.\n");
+  fs.writeFileSync(path.join(ctx.workspaceDir, "src", "tool.ts"), "export const answer = 42;\n");
+  fs.writeFileSync(path.join(ctx.workspaceDir, "node_modules", "ignored-package", "index.js"), "throw new Error('hidden');\n");
+
+  await page.goto(ctx.baseUrl);
+  await page.getByRole("textbox", { name: "Command" }).fill("color-env-agent");
+  await page.getByRole("textbox", { name: "Command" }).press("Enter");
+  await expect(page.getByTestId("rendered-terminal")).toContainText(/plain|colored/);
+
+  await clickSessionMenuButton(page, "IDE");
+
+  await expect(page.getByTestId("ide-view")).toBeVisible();
+  await expect(page.getByRole("treeitem", { name: "src", exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("treeitem", { name: "tool.ts", exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("treeitem", { name: "README.md", exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("treeitem", { name: "ignored-package", exact: true })).toHaveCount(0);
+  await expect(page.getByTestId("ide-file-editor")).toContainText("export const answer = 42");
+
+  await page.getByRole("treeitem", { name: "README.md", exact: true }).first().click();
+
+  await expect(page.getByTestId("ide-file-editor")).toContainText("This file comes from the session cwd.");
+});
+
 test("opens a coordinator session from the coordinator shortcut", async ({ page, ctx }) => {
   await page.goto(ctx.baseUrl);
   await expect(page.getByRole("link", { name: "Factory floor" })).toHaveText("🏭");

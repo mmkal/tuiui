@@ -4,6 +4,7 @@ import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { vsCodeDark } from "@fsegurai/codemirror-theme-bundle";
 import jsonata from "@mmkal/jsonata/sync";
+import { FileTree } from "@pierre/trees";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import type { ILinkHandler, Terminal as XtermTerminal } from "@xterm/xterm";
@@ -258,6 +259,27 @@ type LaunchSessionInput = {
   coordinator?: boolean;
 };
 
+type SessionFileTreePayload = {
+  cwd: string;
+  paths: string[];
+  truncated: boolean;
+  entryCount: number;
+  maxEntries: number;
+  ignoredNames: string[];
+};
+
+type SessionFileContentPayload = {
+  cwd: string;
+  path: string;
+  name: string;
+  kind: "text" | "binary" | "too-large";
+  content: string;
+  size: number;
+  limit: number;
+  updatedAt: string;
+  message: string;
+};
+
 type AttachmentUpload = {
   path: string;
   name: string;
@@ -293,12 +315,16 @@ type StoredChord = {
 const app = document.getElementById("app")!;
 let events: EventSource | null = null;
 let activeSession: SessionPayload | null = null;
-let renderer: "terminal" | "sdk" = "terminal";
+let renderer: "terminal" | "sdk" | "ide" = "terminal";
 let dataEditorView: EditorView | null = null;
-let dataEditorKind: "" | "sdk-yaml" | "blocks-json" = "";
+let dataEditorKind: "" | "sdk-yaml" | "blocks-json" | "file-text" = "";
 let dataEditorDoc = "";
 let briefEditorView: EditorView | null = null;
 let briefEditorDoc = "";
+let ideFileTree: FileTree | null = null;
+let ideFileTreeSessionId = "";
+let ideFileTreeLoadingSessionId = "";
+let ideSelectedFilePath = "";
 let eventsPaused = false;
 let terminalResizeObserver: ResizeObserver | null = null;
 let terminalResizeTimer: number | null = null;
@@ -733,6 +759,7 @@ async function renderRoute() {
   clearSessionIdleRefreshTimer();
   stopHomeIdleNotificationPolling();
   destroyXterm();
+  destroyIdeFileTree();
   activeSession = null;
   destroyDataEditor();
   unsubscribeVoiceLoop?.();
@@ -1586,6 +1613,7 @@ async function renderSession(sessionId: string) {
               </div>
               <div class="toolbar" role="group" aria-label="Session controls">
                 <button type="button" class="icon-button" data-renderer="terminal" aria-pressed="${renderer === "terminal"}">TTY</button>
+                <button type="button" class="icon-button" data-renderer="ide" aria-pressed="${renderer === "ide"}">IDE</button>
                 <button type="button" class="icon-button" data-renderer="sdk" aria-pressed="${renderer === "sdk"}">Debug</button>
                 <button type="button" class="icon-button" data-action="pause-events" aria-pressed="false">Pause events</button>
                 <button type="button" class="icon-button" data-action="relayout">Relayout</button>
@@ -1759,7 +1787,7 @@ function bindSessionControls(sessionId: string) {
   document.querySelectorAll<HTMLButtonElement>("[data-renderer]").forEach((button) => {
     button.addEventListener("click", () => {
       const nextRenderer = button.dataset.renderer;
-      renderer = nextRenderer === "sdk" ? "sdk" : "terminal";
+      renderer = nextRenderer === "sdk" ? "sdk" : nextRenderer === "ide" ? "ide" : "terminal";
       renderSessionPayload(activeSession);
       if (renderer === "sdk") {
         void refreshSdk(sessionId).catch((error) => {
@@ -2336,12 +2364,18 @@ function renderSessionPayload(
 
   const screen = document.getElementById("screen")!;
   if (renderer === "terminal") {
+    destroyIdeFileTree();
     destroyDataEditor();
     renderTerminalScreen(screen, payload);
   } else if (renderer === "sdk") {
+    destroyIdeFileTree();
     stopTerminalAutoResize();
     destroyXterm();
     renderSdkScreen(screen, payload);
+  } else if (renderer === "ide") {
+    stopTerminalAutoResize();
+    destroyXterm();
+    renderIdeScreen(screen, payload);
   }
 
   const stdinLog = document.querySelector<HTMLElement>("[data-testid='stdin-log']");
@@ -2570,6 +2604,245 @@ function renderTerminalScreen(screen: HTMLElement, payload: SessionPayload) {
   }
   xtermSyncQueue = xtermSyncQueue.then(() => syncXterm(payload)).catch(() => undefined);
   startTerminalAutoResize(payload.id);
+}
+
+function renderIdeScreen(screen: HTMLElement, payload: SessionPayload) {
+  screen.className = "screen ide-screen";
+  const existingLayout = screen.querySelector(".ide-layout");
+  if (existingLayout && ideFileTreeSessionId === payload.id) {
+    return;
+  }
+
+  destroyDataEditor();
+  destroyIdeFileTree();
+  ideFileTreeSessionId = payload.id;
+  ideSelectedFilePath = "";
+  screen.innerHTML = `
+    <section class="ide-layout" data-testid="ide-view">
+      <aside class="ide-sidebar" aria-label="Files under current working directory">
+        <header>
+          <strong>Files</strong>
+          <code title="${escapeAttr(payload.cwd)}">${escapeHtml(formatPathForDisplay(payload.cwd, homeDirsForDisplay({ cwd: payload.cwd })))}</code>
+        </header>
+        <div id="ide-file-tree" class="ide-tree-mount" data-testid="ide-file-tree">
+          <p class="empty">Loading files</p>
+        </div>
+      </aside>
+      <section class="ide-editor-pane" aria-label="File preview">
+        <header>
+          <strong data-ide-file-title>No file selected</strong>
+          <span data-ide-file-meta></span>
+        </header>
+        <p class="ide-file-message" data-ide-file-message>Select a file from the tree.</p>
+        <div id="ide-file-editor" class="ide-file-editor" data-testid="ide-file-editor"></div>
+      </section>
+    </section>
+  `;
+  mountFileTextEditor("");
+  void loadIdeFileTree(payload.id);
+}
+
+async function loadIdeFileTree(sessionId: string) {
+  if (ideFileTreeLoadingSessionId === sessionId) {
+    return;
+  }
+  ideFileTreeLoadingSessionId = sessionId;
+  try {
+    const tree = await clientApi.sessions.fileTree({ sessionId });
+    if (renderer !== "ide" || activeSession?.id !== sessionId) {
+      return;
+    }
+    renderIdeFileTree(sessionId, tree);
+  } catch (error) {
+    if (renderer === "ide" && activeSession?.id === sessionId) {
+      renderIdeTreeError(error);
+    }
+  } finally {
+    if (ideFileTreeLoadingSessionId === sessionId) {
+      ideFileTreeLoadingSessionId = "";
+    }
+  }
+}
+
+function renderIdeFileTree(sessionId: string, payload: SessionFileTreePayload) {
+  const host = document.getElementById("ide-file-tree");
+  if (!host) {
+    return;
+  }
+  destroyIdeFileTree();
+  ideFileTreeSessionId = sessionId;
+  host.textContent = "";
+
+  if (!payload.paths.length) {
+    host.innerHTML = `<p class="empty">No files</p>`;
+    setIdeFileMessage("No previewable files were found under this cwd.");
+    return;
+  }
+
+  const firstFilePath = firstPreviewFilePath(payload.paths);
+  ideFileTree = new FileTree({
+    density: "compact",
+    fileTreeSearchMode: "hide-non-matches",
+    flattenEmptyDirectories: true,
+    initialExpansion: "open",
+    initialSelectedPaths: firstFilePath ? [firstFilePath] : [],
+    paths: payload.paths,
+    search: true,
+    unsafeCSS: ideFileTreeCss(),
+    onSelectionChange(selectedPaths) {
+      const selectedPath = selectedPaths[0] || "";
+      if (!selectedPath) {
+        return;
+      }
+      const item = ideFileTree?.getItem(selectedPath);
+      if (!item || item.isDirectory()) {
+        return;
+      }
+      void selectIdeFile(sessionId, selectedPath);
+    },
+  });
+  ideFileTree.render({ containerWrapper: host });
+  if (payload.truncated) {
+    host.insertAdjacentHTML("beforeend", `
+      <p class="ide-tree-note">Showing first ${payload.entryCount} entries of ${payload.maxEntries}.</p>
+    `);
+  }
+  if (firstFilePath) {
+    void selectIdeFile(sessionId, firstFilePath);
+  } else {
+    setIdeFileMessage("No previewable files were found under this cwd.");
+  }
+}
+
+function renderIdeTreeError(error: unknown) {
+  const host = document.getElementById("ide-file-tree");
+  if (!host) {
+    return;
+  }
+  destroyIdeFileTree();
+  host.innerHTML = `<p class="ide-file-message">${escapeHtml(String(error instanceof Error ? error.message : error))}</p>`;
+  setIdeFileMessage("File tree unavailable.");
+}
+
+async function selectIdeFile(sessionId: string, filePath: string) {
+  if (ideSelectedFilePath === filePath && dataEditorKind === "file-text") {
+    return;
+  }
+  ideSelectedFilePath = filePath;
+  setIdeFileChrome(filePath, "Loading");
+  setIdeFileMessage("");
+  mountFileTextEditor("");
+  try {
+    const file = await clientApi.sessions.fileContent({ sessionId, path: filePath });
+    if (renderer !== "ide" || activeSession?.id !== sessionId || ideSelectedFilePath !== filePath) {
+      return;
+    }
+    renderIdeFileContent(file);
+  } catch (error) {
+    if (renderer === "ide" && activeSession?.id === sessionId && ideSelectedFilePath === filePath) {
+      setIdeFileChrome(filePath, "Unavailable");
+      mountFileTextEditor("");
+      setIdeFileMessage(String(error instanceof Error ? error.message : error));
+    }
+  }
+}
+
+function renderIdeFileContent(file: SessionFileContentPayload) {
+  setIdeFileChrome(file.path, `${formatFileSize(file.size)} · ${file.kind}`);
+  if (file.kind !== "text") {
+    mountFileTextEditor("");
+    setIdeFileMessage(file.message);
+    return;
+  }
+  mountFileTextEditor(file.content);
+  setIdeFileMessage("");
+  requestAnimationFrame(() => dataEditorView?.requestMeasure());
+}
+
+function mountFileTextEditor(doc: string) {
+  const host = document.getElementById("ide-file-editor");
+  if (!host) {
+    return;
+  }
+  if (!dataEditorView || dataEditorKind !== "file-text") {
+    destroyDataEditor();
+    dataEditorView = new EditorView({
+      parent: host,
+      state: EditorState.create({
+        doc,
+        extensions: [
+          basicSetup,
+          vsCodeDark,
+          EditorState.readOnly.of(true),
+          EditorView.editable.of(false),
+          EditorView.contentAttributes.of({ "aria-label": "IDE file content" }),
+          editorTheme(),
+        ],
+      }),
+    });
+    dataEditorKind = "file-text";
+    dataEditorDoc = doc;
+    return;
+  }
+  updateDataEditorDoc(doc);
+}
+
+function firstPreviewFilePath(paths: string[]) {
+  return paths.find((candidate) => !candidate.endsWith("/")) || "";
+}
+
+function setIdeFileChrome(title: string, meta: string) {
+  const titleElement = document.querySelector<HTMLElement>("[data-ide-file-title]");
+  const metaElement = document.querySelector<HTMLElement>("[data-ide-file-meta]");
+  if (titleElement) {
+    titleElement.textContent = title || "No file selected";
+    titleElement.title = title;
+  }
+  if (metaElement) {
+    metaElement.textContent = meta;
+  }
+}
+
+function setIdeFileMessage(message: string) {
+  const element = document.querySelector<HTMLElement>("[data-ide-file-message]");
+  if (!element) {
+    return;
+  }
+  element.textContent = message;
+  element.hidden = !message;
+}
+
+function destroyIdeFileTree() {
+  ideFileTree?.cleanUp();
+  ideFileTree = null;
+  ideFileTreeSessionId = "";
+  ideFileTreeLoadingSessionId = "";
+  ideSelectedFilePath = "";
+}
+
+function ideFileTreeCss() {
+  return `
+    :host {
+      --trees-bg-override: #10151b;
+      --trees-fg-override: #dce5ef;
+      --trees-muted-fg-override: #8d99a8;
+      --trees-border-color-override: #29313b;
+      --trees-selected-bg-override: #64d2c8;
+      --trees-selected-fg-override: #071112;
+      color: #dce5ef;
+      font: 11px/1.25 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+  `;
+}
+
+function formatFileSize(size: number) {
+  if (size >= 1024 * 1024) {
+    return `${Math.round(size / (1024 * 1024))} MB`;
+  }
+  if (size >= 1024) {
+    return `${Math.round(size / 1024)} KB`;
+  }
+  return `${size} bytes`;
 }
 
 function updateTerminalRedrawOverlay(screen: HTMLElement, active: boolean) {

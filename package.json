@@ -26,6 +26,7 @@
     "@opencode-ai/sdk": "^1.14.41",
     "@orpc/client": "^1.14.3",
     "@orpc/server": "^1.14.3",
+    "@pierre/trees": "1.0.0-beta.3",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/addon-web-links": "^0.12.0",

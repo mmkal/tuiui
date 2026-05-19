@@ -236,6 +236,21 @@ const redrawQuietMs = 600;
 const redrawMaxMs = 10_000;
 const attachmentRoot = fs.mkdtempSync(path.join(os.tmpdir(), "tuiui-attachments-"));
 const terminalScrollbackSnapshotRows = 500;
+const fileTreeMaxEntries = 2_000;
+const fileContentMaxBytes = 512 * 1024;
+const fileReadSampleBytes = 8 * 1024;
+const ignoredFileTreeNames = new Set([
+  ".DS_Store",
+  ".git",
+  ".next",
+  ".turbo",
+  "build",
+  "coverage",
+  "dist",
+  "node_modules",
+  "playwright-report",
+  "test-results",
+]);
 
 const createSessionBodySchema = z.object({
   command: z.string().optional(),
@@ -259,6 +274,7 @@ const resizeSessionInputSchema = sessionIdInputSchema.extend({
   rows: z.number().optional(),
 });
 const stdoutSessionInputSchema = sessionIdInputSchema.extend({ after: z.number().optional() });
+const sessionFileContentInputSchema = sessionIdInputSchema.extend({ path: z.string() });
 
 type CreateSessionBody = z.infer<typeof createSessionBodySchema>;
 type SessionIdInput = z.infer<typeof sessionIdInputSchema>;
@@ -266,6 +282,7 @@ type SendSessionInput = z.infer<typeof sendSessionInputSchema>;
 type KeySessionInput = z.infer<typeof keySessionInputSchema>;
 type ResizeSessionInput = z.infer<typeof resizeSessionInputSchema>;
 type StdoutSessionInput = z.infer<typeof stdoutSessionInputSchema>;
+type SessionFileContentInput = z.infer<typeof sessionFileContentInputSchema>;
 
 type CommandPresetPayload = {
   id: string;
@@ -380,6 +397,8 @@ function createAppRouter(state: ServerState) {
       create: orpc.input(createSessionBodySchema).handler(({ input }) => createSessionPayload(input)),
       get: orpc.input(sessionIdInputSchema).handler(({ input }) => sessionPayloadById(state, input.sessionId)),
       stdout: orpc.input(stdoutSessionInputSchema).handler(({ input }) => stdoutSessionPayload(state, input)),
+      fileTree: orpc.input(sessionIdInputSchema).handler(({ input }) => sessionFileTreePayload(state, input.sessionId)),
+      fileContent: orpc.input(sessionFileContentInputSchema).handler(({ input }) => sessionFileContentPayload(state, input)),
       recovery: orpc.input(sessionIdInputSchema).handler(({ input }) => sessionRecoveryPayload(state, input.sessionId)),
       recover: orpc.input(sessionIdInputSchema).handler(({ input }) => recoverStoredSessionPayload(state, input.sessionId)),
       archive: orpc.input(sessionIdInputSchema).handler(({ input }) => archiveSessionPayload(state, input.sessionId)),
@@ -786,6 +805,16 @@ async function stdoutSessionPayload(state: ServerState, input: StdoutSessionInpu
   };
 }
 
+async function sessionFileTreePayload(state: ServerState, sessionId: string) {
+  const session = await liveSessionById(state, sessionId);
+  return readSessionFileTree(session.cwd);
+}
+
+async function sessionFileContentPayload(state: ServerState, input: SessionFileContentInput) {
+  const session = await liveSessionById(state, input.sessionId);
+  return readSessionFileContent(session.cwd, input.path);
+}
+
 function sessionRecoveryPayload(state: ServerState, sessionId: string) {
   const session = state.sessionStore.getSession(sessionId);
   if (!session) {
@@ -905,6 +934,180 @@ async function liveSessionById(state: ServerState, sessionId: string) {
     throw new ORPCError("NOT_FOUND", { message: "Session not found" });
   }
   return session;
+}
+
+function readSessionFileTree(cwd: string) {
+  const root = fs.realpathSync(cwd);
+  const state = {
+    paths: [] as string[],
+    truncated: false,
+  };
+  collectFileTreePaths(root, "", state);
+  return {
+    cwd: root,
+    paths: state.paths,
+    truncated: state.truncated,
+    entryCount: state.paths.length,
+    maxEntries: fileTreeMaxEntries,
+    ignoredNames: [...ignoredFileTreeNames].sort(),
+  };
+}
+
+function collectFileTreePaths(root: string, relativeDir: string, state: { paths: string[]; truncated: boolean }) {
+  if (state.paths.length >= fileTreeMaxEntries) {
+    state.truncated = true;
+    return;
+  }
+
+  const absoluteDir = relativeDir ? path.join(root, relativeDir) : root;
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(absoluteDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  entries
+    .filter((entry) => !ignoredFileTreeNames.has(entry.name))
+    .sort(compareFileTreeDirents)
+    .forEach((entry) => {
+      if (state.paths.length >= fileTreeMaxEntries) {
+        state.truncated = true;
+        return;
+      }
+
+      const relativePath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+      const absolutePath = path.join(root, relativePath);
+      const entryKind = resolveFileTreeEntryKind(root, absolutePath, entry);
+      if (!entryKind) {
+        return;
+      }
+
+      state.paths.push(toFileTreePath(relativePath, entryKind === "directory"));
+      if (entryKind === "directory") {
+        collectFileTreePaths(root, relativePath, state);
+      }
+    });
+}
+
+function compareFileTreeDirents(left: fs.Dirent, right: fs.Dirent) {
+  const leftDirectory = left.isDirectory();
+  const rightDirectory = right.isDirectory();
+  if (leftDirectory !== rightDirectory) {
+    return leftDirectory ? -1 : 1;
+  }
+  return left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" });
+}
+
+function resolveFileTreeEntryKind(root: string, absolutePath: string, entry: fs.Dirent): "directory" | "file" | "" {
+  if (entry.isDirectory()) {
+    return "directory";
+  }
+  if (entry.isFile()) {
+    return "file";
+  }
+  if (!entry.isSymbolicLink()) {
+    return "";
+  }
+
+  try {
+    const realPath = fs.realpathSync(absolutePath);
+    if (!pathIsInside(root, realPath)) {
+      return "";
+    }
+    const stats = fs.statSync(realPath);
+    if (stats.isDirectory()) {
+      return "";
+    }
+    return stats.isFile() ? "file" : "";
+  } catch {
+    return "";
+  }
+}
+
+function readSessionFileContent(cwd: string, requestedPath: string) {
+  const filePath = requestedPath.trim();
+  if (!filePath || filePath.includes("\0")) {
+    throw new ORPCError("BAD_REQUEST", { message: "file path is required" });
+  }
+
+  const root = fs.realpathSync(cwd);
+  const absolutePath = path.resolve(root, filePath);
+  let realPath: string;
+  try {
+    realPath = fs.realpathSync(absolutePath);
+  } catch {
+    throw new ORPCError("NOT_FOUND", { message: "File not found" });
+  }
+  if (!pathIsInside(root, realPath)) {
+    throw new ORPCError("FORBIDDEN", { message: "File is outside the session cwd" });
+  }
+
+  const stats = fs.statSync(realPath);
+  if (!stats.isFile()) {
+    throw new ORPCError("CONFLICT", { message: "Selected path is not a file" });
+  }
+
+  const relativePath = toFileTreePath(path.relative(root, realPath), false);
+  const basePayload = {
+    cwd: root,
+    path: relativePath,
+    name: path.basename(realPath),
+    size: stats.size,
+    limit: fileContentMaxBytes,
+    updatedAt: stats.mtime.toISOString(),
+  };
+
+  if (stats.size > fileContentMaxBytes) {
+    return {
+      ...basePayload,
+      kind: "too-large" as const,
+      content: "",
+      message: `File is ${formatByteCount(stats.size)}, above the ${formatByteCount(fileContentMaxBytes)} preview limit.`,
+    };
+  }
+
+  const buffer = fs.readFileSync(realPath);
+  if (isLikelyBinaryFile(buffer)) {
+    return {
+      ...basePayload,
+      kind: "binary" as const,
+      content: "",
+      message: "Binary files are not previewed.",
+    };
+  }
+
+  return {
+    ...basePayload,
+    kind: "text" as const,
+    content: buffer.toString("utf8"),
+    message: "",
+  };
+}
+
+function toFileTreePath(relativePath: string, directory: boolean) {
+  const normalized = relativePath.split(path.sep).join("/");
+  return directory ? `${normalized.replace(/\/+$/g, "")}/` : normalized;
+}
+
+function pathIsInside(root: string, candidate: string) {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function isLikelyBinaryFile(buffer: Buffer) {
+  const sample = buffer.subarray(0, Math.min(buffer.length, fileReadSampleBytes));
+  return sample.includes(0);
+}
+
+function formatByteCount(value: number) {
+  if (value >= 1024 * 1024) {
+    return `${Math.round(value / (1024 * 1024))} MB`;
+  }
+  if (value >= 1024) {
+    return `${Math.round(value / 1024)} KB`;
+  }
+  return `${value} bytes`;
 }
 
 function jsonOrRpcError(fn: () => unknown) {

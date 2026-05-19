@@ -1455,6 +1455,109 @@ pre {
   overflow: hidden;
 }
 
+.ide-screen {
+  background: #0b0d10;
+  overflow: hidden;
+}
+
+.ide-layout {
+  display: grid;
+  grid-template-columns: minmax(170px, 260px) minmax(0, 1fr);
+  gap: 1px;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  background: #252c36;
+}
+
+.ide-sidebar,
+.ide-editor-pane {
+  display: grid;
+  min-height: 0;
+  min-width: 0;
+  background: #0d1014;
+}
+
+.ide-sidebar {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.ide-sidebar header,
+.ide-editor-pane header {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border-bottom: 1px solid #252c36;
+  background: #11161d;
+  padding: 8px 10px;
+}
+
+.ide-sidebar header strong,
+.ide-editor-pane header strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #f4f7fb;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.ide-sidebar header code,
+.ide-editor-pane header span {
+  min-width: 0;
+  overflow: hidden;
+  color: #8d99a8;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 10px/1.25 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.ide-tree-mount {
+  min-height: 0;
+  overflow: hidden;
+  background: #0f141a;
+}
+
+.ide-tree-mount > * {
+  height: 100%;
+}
+
+.ide-tree-note,
+.ide-file-message {
+  margin: 0;
+  color: #9ca8b6;
+  font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.ide-tree-note {
+  border-top: 1px solid #252c36;
+  padding: 7px 10px;
+}
+
+.ide-editor-pane {
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.ide-file-message {
+  border-bottom: 1px solid #252c36;
+  background: #121820;
+  padding: 7px 10px;
+}
+
+.ide-file-message[hidden] {
+  display: none;
+}
+
+.ide-file-editor {
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.ide-file-editor .cm-editor {
+  height: 100%;
+}
+
 .terminal-xterm-wrap {
   position: relative;
   width: 100%;
@@ -2853,6 +2956,20 @@ textarea[data-label="promptbox"][data-overflowing="true"] {
 
   .screen {
     border-radius: 6px;
+  }
+
+  .ide-layout {
+    grid-template-columns: minmax(112px, 35vw) minmax(0, 1fr);
+  }
+
+  .ide-sidebar header,
+  .ide-editor-pane header {
+    padding: 6px 7px;
+  }
+
+  .ide-sidebar header strong,
+  .ide-editor-pane header strong {
+    font-size: 11px;
   }
 
   .main-surface[data-renderer="terminal"] {
