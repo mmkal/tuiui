@@ -1,5 +1,9 @@
 If I tell you to capture a photo, run `bun upload.ts capture`. It will print out a URL which you should show me. I'll click the URL and upload a photo. The CLI will wait until the photo exists, then print out its path and exit.
 
+## Dev server restarts
+
+If I tell you to kill or restart a dev server, first check whether `dev forever` is running, including the `ignoreme` variant. If it is running, just kill the dev server process; `dev forever` will revive it. If `dev forever` is not running, refuse to kill or restart the server, because doing so will cut me off.
+
 ## Pull request media
 
 When a pull request would benefit from visual review, include screenshots or short videos in the PR body. The most reliable way to upload arbitrary media to GitHub is to use the browser attachment flow:

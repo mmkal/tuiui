@@ -617,16 +617,40 @@ function commandPresetsPayload(): CommandPresetPayload[] {
   ];
 }
 
-function codexbarUsagePayload() {
+async function codexbarUsagePayload() {
   const command = ["codexbar", "--format", "json", "--json-only"];
+  const timeoutMs = 5_000;
+  const child = Bun.spawn(command, {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: process.env,
+  });
   try {
-    const stdout = execFileSync(command[0], command.slice(1), {
-      encoding: "utf8",
-      timeout: 30_000,
-      maxBuffer: 8 * 1024 * 1024,
-    });
+    const result = await Promise.race([
+      readCodexbarProcess(child),
+      new Promise<{ timedOut: true }>((resolve) => {
+        setTimeout(() => {
+          child.kill("SIGTERM");
+          resolve({ timedOut: true });
+        }, timeoutMs);
+      }),
+    ]);
+    if ("timedOut" in result) {
+      return {
+        ok: false,
+        data: null,
+        error: `codexbar timed out after ${timeoutMs / 1_000}s.`,
+      };
+    }
+    if (result.exitCode !== 0) {
+      return {
+        ok: false,
+        data: null,
+        error: formatCodexbarCliFailure(result),
+      };
+    }
     try {
-      return { ok: true, data: JSON.parse(stdout), error: "" };
+      return { ok: true, data: JSON.parse(result.stdout), error: "" };
     } catch (error) {
       return {
         ok: false,
@@ -641,6 +665,27 @@ function codexbarUsagePayload() {
       error: formatCodexbarCliError(error),
     };
   }
+}
+
+async function readCodexbarProcess(child: Bun.Subprocess<"ignore", "pipe", "pipe">) {
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { stdout, stderr, exitCode };
+}
+
+function formatCodexbarCliFailure(failure: { stdout: string; stderr: string; exitCode: number | null }) {
+  const stderr = failure.stderr.trim();
+  if (stderr) {
+    return stderr;
+  }
+  const stdout = failure.stdout.trim();
+  if (stdout) {
+    return stdout;
+  }
+  return `codexbar exited with status ${String(failure.exitCode)}.`;
 }
 
 function formatCodexbarCliError(error: unknown) {
