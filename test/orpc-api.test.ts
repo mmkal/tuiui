@@ -157,6 +157,11 @@ setInterval(() => {}, 1_000);
 
 function codexbarSource() {
   return `#!/usr/bin/env node
+if (process.argv[2] !== "usage") {
+  process.stderr.write("expected usage subcommand");
+  process.exit(1);
+}
+process.stdout.write("[codex notify] remoteControl/status/changed\\n");
 process.stdout.write(JSON.stringify({
   provider: "codex",
   source: "test",

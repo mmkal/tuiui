@@ -618,7 +618,7 @@ function commandPresetsPayload(): CommandPresetPayload[] {
 }
 
 async function codexbarUsagePayload() {
-  const command = ["codexbar", "--format", "json", "--json-only"];
+  const command = ["codexbar", "usage", "--provider", "codex", "--source", "cli", "--format", "json", "--json-only"];
   const timeoutMs = 5_000;
   const child = Bun.spawn(command, {
     stdout: "pipe",
@@ -650,7 +650,7 @@ async function codexbarUsagePayload() {
       };
     }
     try {
-      return { ok: true, data: JSON.parse(result.stdout), error: "" };
+      return { ok: true, data: parseCodexbarJson(result.stdout), error: "" };
     } catch (error) {
       return {
         ok: false,
@@ -665,6 +665,21 @@ async function codexbarUsagePayload() {
       error: formatCodexbarCliError(error),
     };
   }
+}
+
+function parseCodexbarJson(stdout: string) {
+  const trimmed = stdout.trim();
+  for (let index = 0; index < trimmed.length; index += 1) {
+    const char = trimmed[index];
+    if (char !== "{" && char !== "[") {
+      continue;
+    }
+    try {
+      return JSON.parse(trimmed.slice(index));
+    } catch {
+    }
+  }
+  throw new Error("no JSON object or array found on stdout");
 }
 
 async function readCodexbarProcess(child: Bun.Subprocess<"ignore", "pipe", "pipe">) {
