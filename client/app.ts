@@ -2512,8 +2512,19 @@ function bindSessionControls(sessionId: string) {
   setupVoiceControls(sessionId, textarea);
   setupAttachmentControls(sessionId, textarea);
 
-  sendButton.addEventListener("click", () => {
+  sendButton.addEventListener("keydown", (event) => {
+    if (!shouldIgnoreEmptyPromptboxKeyboardSend(event, textarea)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  });
+
+  sendButton.addEventListener("click", (event) => {
     if (!textarea.value) {
+      if (shouldIgnoreEmptyPromptboxKeyboardSend(event, textarea)) {
+        return;
+      }
       void sendChordSequence(sessionId, "enter", "common-enter");
       return;
     }
@@ -3356,14 +3367,16 @@ function dispatchTerminalWheelLines(term: XtermTerminal, lines: number, at?: { c
   // One single-line event per line: xterm emits at most one mouse report per wheel event, so a
   // burst of small events scrolls mouse-tracking TUIs by the intended amount.
   for (let index = 0; index < Math.abs(lines); index += 1) {
-    screen.dispatchEvent(new WheelEvent("wheel", {
+    const event = new WheelEvent("wheel", {
       deltaY: step,
       deltaMode: WheelEvent.DOM_DELTA_LINE,
       clientX,
       clientY,
       bubbles: true,
       cancelable: true,
-    }));
+    });
+    Object.defineProperty(event, "tuiuiTerminalWheel", { value: true });
+    screen.dispatchEvent(event);
   }
 }
 
@@ -4933,6 +4946,66 @@ function bindTerminalTapActivation(term: XtermTerminal) {
   };
 }
 
+function bindMobileTerminalEnterWorkaround(term: XtermTerminal, sendTerminalInput: (text: string) => void) {
+  const textarea = term.textarea;
+  if (!textarea || textarea.dataset.tuiuiMobileEnterBound === "true") {
+    return;
+  }
+  textarea.dataset.tuiuiMobileEnterBound = "true";
+
+  let lastSyntheticEnterAt = 0;
+
+  const shouldHandle = () => shouldWorkAroundMobileTerminalEnter() && textarea.value === "";
+  const shouldHandleLineBreakInput = (event: InputEvent) => {
+    return shouldHandle() && (event.inputType === "insertLineBreak" || event.inputType === "insertParagraph");
+  };
+  const sendSyntheticEnter = () => {
+    const now = performance.now();
+    if (now - lastSyntheticEnterAt < 40) {
+      return;
+    }
+    lastSyntheticEnterAt = now;
+    sendTerminalInput("\r");
+    textarea.value = "";
+  };
+
+  textarea.addEventListener("keydown", (event) => {
+    if (!shouldHandle() || event.key !== "Enter" || event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) {
+      return;
+    }
+    sendSyntheticEnter();
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+
+  textarea.addEventListener("beforeinput", (event) => {
+    if (!(event instanceof InputEvent) || !shouldHandleLineBreakInput(event)) {
+      return;
+    }
+    sendSyntheticEnter();
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+
+  textarea.addEventListener("input", (event) => {
+    if (!(event instanceof InputEvent) || !shouldHandleLineBreakInput(event)) {
+      return;
+    }
+    textarea.value = "";
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+}
+
+function bindMobileTerminalWheelGuard(term: XtermTerminal) {
+  term.attachCustomWheelEventHandler((event) => {
+    if (!shouldWorkAroundMobileTerminalEnter()) {
+      return true;
+    }
+    return Boolean((event as WheelEvent & { tuiuiTerminalWheel?: boolean }).tuiuiTerminalWheel);
+  });
+}
+
 function terminalTapActivationShouldTrack(term: XtermTerminal, event: PointerEvent) {
   if (!terminalTouchSelectionIsNarrow() || event.pointerType === "mouse" || event.button !== 0) {
     return false;
@@ -5508,6 +5581,10 @@ function terminalTouchSelectionShouldHandle(term: XtermTerminal, event: PointerE
 
 function terminalTouchSelectionIsNarrow() {
   return window.innerWidth <= 720 && (navigator.maxTouchPoints > 0 || window.matchMedia("(pointer: coarse)").matches);
+}
+
+function shouldWorkAroundMobileTerminalEnter() {
+  return window.matchMedia("(pointer: coarse), (max-width: 640px)").matches;
 }
 
 function terminalTouchSelectionInteractiveTarget(target: EventTarget | null) {
@@ -6350,6 +6427,7 @@ async function ensureXterm(payload: SessionPayload) {
     term.loadAddon(new WebLinksAddon(openTerminalHttpLink));
     terminalImageLinkProvider = term.registerLinkProvider(createTerminalImageLinkProvider(term));
     term.open(host);
+    bindMobileTerminalWheelGuard(term);
     loadTerminalWebglAddon(term);
     bindTerminalImageHints(term);
     bindTerminalTouchSelection(term);
@@ -6366,6 +6444,7 @@ async function ensureXterm(payload: SessionPayload) {
         .then(() => undefined)
         .catch(() => undefined);
     };
+    bindMobileTerminalEnterWorkaround(term, sendTerminalInput);
     term.onData(sendTerminalInput);
     // Mouse reports in the default (non-SGR) encoding are emitted via onBinary, not onData.
     term.onBinary(sendTerminalInput);
@@ -7594,6 +7673,19 @@ function shouldAutoFocusChordInput() {
 
 function usesTextareaReturnForNewline() {
   return window.matchMedia("(max-width: 640px)").matches;
+}
+
+function shouldIgnoreEmptyPromptboxKeyboardSend(event: Event, textarea: HTMLTextAreaElement) {
+  if (!shouldWorkAroundMobileTerminalEnter() || textarea.value) {
+    return false;
+  }
+  if (event instanceof KeyboardEvent) {
+    return event.key === "Enter" && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey;
+  }
+  if (event instanceof MouseEvent) {
+    return event.detail === 0;
+  }
+  return false;
 }
 
 function renderVoiceToggleButton(className: string) {

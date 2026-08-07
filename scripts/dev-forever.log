@@ -1,0 +1,13 @@
+[2026-08-05 22:56:22] watching port 7373 every 30s
+[2026-08-05 22:56:22] nothing listening on 7373; starting bun run dev
+[2026-08-05 22:56:22] bun run dev started as pid 31434
+$ bun run cli.ts daemon
+http://127.0.0.1:7373
+http://100.69.22.58:7373
+Bundled page in 65ms: public/index.html
+[tuiui] recent codex sessions unavailable: unable to open database file
+[tuiui] recent codex sessions unavailable: unable to open database file
+[tuiui] recent codex sessions unavailable: unable to open database file
+[tuiui] recent codex sessions unavailable: unable to open database file
+[tuiui] recent codex sessions unavailable: unable to open database file
+[tuiui] recent codex sessions unavailable: unable to open database file

@@ -1648,6 +1648,46 @@ test("can type directly into the terminal renderer", async ({ page, ctx }) => {
   await expect(page.getByTestId("rendered-terminal")).toContainText("three");
 });
 
+test("treats mobile helper-textarea line breaks as terminal enter", async ({ page, ctx }) => {
+  await page.goto(ctx.baseUrl);
+  await page.getByRole("textbox", { name: "Command" }).fill("pi");
+  await page.getByRole("textbox", { name: "Command" }).press("Enter");
+  await expect(page.getByTestId("rendered-terminal")).toContainText("Pi test TUI");
+  await page.setViewportSize({ width: 390, height: 844 });
+
+  await page.locator(".terminal-host").click();
+  await page.evaluate(() => {
+    const textarea = document.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea");
+    if (!textarea) {
+      throw new Error("xterm helper textarea not found");
+    }
+    textarea.focus();
+    textarea.dispatchEvent(new InputEvent("beforeinput", {
+      bubbles: true,
+      cancelable: true,
+      data: "\n",
+      inputType: "insertLineBreak",
+    }));
+  });
+
+  await expect.poll(async () => (await fetchSessionPayload(page)).stdinEvents.at(-1)?.text).toBe("\r");
+});
+
+test("ignores mobile keyboard activation of send when the promptbox is empty", async ({ page, ctx }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(ctx.baseUrl);
+  await page.getByRole("textbox", { name: "Command" }).fill("pi");
+  await page.getByRole("textbox", { name: "Command" }).press("Enter");
+  await expect(page.getByTestId("rendered-terminal")).toContainText("Pi test TUI");
+
+  const stdinEventCount = (await fetchSessionPayload(page)).stdinEvents.length;
+  const sendButton = page.getByRole("button", { name: "Send" });
+  await sendButton.focus();
+  await page.keyboard.press("Enter");
+
+  expect((await fetchSessionPayload(page)).stdinEvents.length).toBe(stdinEventCount);
+});
+
 test("long press selects terminal text on narrow touch screens", async ({ browser, ctx }, testInfo) => {
   await using touch = await createTouchPage(browser, testInfo);
   const page = touch.page;
@@ -1896,6 +1936,26 @@ test("scroll buttons send arrow keys to an alt-screen TUI without mouse tracking
 
   // xterm converts wheel to cursor keys in the alt buffer; the tty echoes ESC [A as ^[[A
   await expect(page.getByTestId("rendered-terminal")).toContainText("^[[A");
+});
+
+test("unmarked mobile wheel events do not become terminal arrow keys", async ({ browser, ctx }, testInfo) => {
+  await using touch = await createTouchPage(browser, testInfo);
+  const page = touch.page;
+
+  await page.goto(ctx.baseUrl);
+  await page.getByRole("textbox", { name: "Command" }).fill("mouse-wheel-agent nomouse");
+  await page.getByRole("textbox", { name: "Command" }).press("Enter");
+  await expect(page.getByTestId("rendered-terminal")).toContainText("alt screen on");
+
+  const stdinEventCount = (await fetchSessionPayload(page)).stdinEvents.length;
+  await page.locator(".xterm-screen").dispatchEvent("wheel", {
+    deltaY: 1,
+    deltaMode: 1,
+    bubbles: true,
+    cancelable: true,
+  });
+
+  expect((await fetchSessionPayload(page)).stdinEvents.length).toBe(stdinEventCount);
 });
 
 test("dragging a mobile terminal selection near the top scrolls upward", async ({ browser, ctx }, testInfo) => {
